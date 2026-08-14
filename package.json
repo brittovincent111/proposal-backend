@@ -1,0 +1,94 @@
+{
+  "name": "qtn-api",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Backend for the QTN proposal/quotation automation platform",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "nest build",
+    "db:start:27021": "sh scripts/start-local-mongo.sh",
+    "db:status:27021": "sh scripts/status-local-mongo.sh",
+    "db:stop:27021": "sh scripts/stop-local-mongo.sh",
+    "start": "nest start",
+    "dev": "npm run db:start:27021 && NODE_ENV=development nest start --watch",
+    "dev:no-db": "NODE_ENV=development nest start --watch",
+    "start:prod": "NODE_ENV=production node dist/main.js",
+    "lint": "eslint \"src/**/*.ts\"",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:e2e": "jest --config test/jest-e2e.json --runInBand",
+    "seed": "ts-node -r tsconfig-paths/register src/seed/seed.cli.ts",
+    "migrate:package-narrative": "ts-node -r tsconfig-paths/register src/packages/migrate-package-narrative.cli.ts",
+    "restore:template-lines": "ts-node -r tsconfig-paths/register src/templates/restore-template-lines.cli.ts",
+    "admin:grant": "ts-node -r tsconfig-paths/register src/platform-admin/grant-platform-admin.cli.ts",
+    "billing:sync-plans": "ts-node -r tsconfig-paths/register src/billing/sync-plan-catalog.cli.ts"
+  },
+  "dependencies": {
+    "@nestjs/common": "^11.1.6",
+    "@nestjs/config": "^4.0.2",
+    "@nestjs/core": "^11.1.6",
+    "@nestjs/jwt": "^11.0.0",
+    "@nestjs/mongoose": "^11.0.3",
+    "@nestjs/passport": "^11.0.5",
+    "@nestjs/platform-express": "^11.1.6",
+    "@nestjs/swagger": "^11.2.0",
+    "@nestjs/throttler": "^6.4.0",
+    "argon2": "^0.44.0",
+    "class-transformer": "^0.5.1",
+    "class-validator": "^0.14.2",
+    "cookie-parser": "^1.4.7",
+    "helmet": "^8.1.0",
+    "mongoose": "^8.9.5",
+    "passport": "^0.7.0",
+    "passport-jwt": "^4.0.1",
+    "puppeteer-core": "^25.5.0",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.1",
+    "sanitize-html": "^2.14.0",
+    "zod": "^3.24.1"
+  },
+  "devDependencies": {
+    "@nestjs/cli": "^11.0.10",
+    "@nestjs/schematics": "^11.0.8",
+    "@nestjs/testing": "^11.1.6",
+    "@types/cookie-parser": "^1.4.8",
+    "@types/express": "^5.0.0",
+    "@types/jest": "^29.5.14",
+    "@types/node": "^22.10.5",
+    "@types/passport-jwt": "^4.0.1",
+    "@types/sanitize-html": "^2.13.0",
+    "@types/supertest": "^6.0.2",
+    "jest": "^29.7.0",
+    "mongodb-memory-server": "^10.1.4",
+    "supertest": "^7.0.0",
+    "ts-jest": "^29.2.5",
+    "ts-node": "^10.9.2",
+    "tsconfig-paths": "^4.2.0",
+    "typescript": "^5.7.3"
+  },
+  "jest": {
+    "moduleFileExtensions": [
+      "js",
+      "json",
+      "ts"
+    ],
+    "rootDir": "src",
+    "testRegex": ".*\\.spec\\.ts$",
+    "transform": {
+      "^.+\\.(t|j)s$": "ts-jest"
+    },
+    "transformIgnorePatterns": [
+      "node_modules/(?!.*(htmlparser2|domhandler|domutils|dom-serializer|domelementtype|entities)/)"
+    ],
+    "moduleNameMapper": {
+      "^src/(.*)$": "<rootDir>/$1"
+    },
+    "collectCoverageFrom": [
+      "**/*.(t|j)s"
+    ],
+    "coverageDirectory": "../coverage",
+    "testEnvironment": "node"
+  }
+}
