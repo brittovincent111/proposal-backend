@@ -197,4 +197,4 @@ ProposalDocumentSchema.index({ organizationId: 1, status: 1 });
 ProposalDocumentSchema.index({ organizationId: 1, customerId: 1 });
 ProposalDocumentSchema.index({ organizationId: 1, createdAt: -1 });
 ProposalDocumentSchema.index({ organizationId: 1, assignedToId: 1 });
-ProposalDocumentSchema.index({ 'share.tokenHash': 1 }, { sparse: true });
+// share.tokenHash's sparse index comes from the prop on the Share subdocument.

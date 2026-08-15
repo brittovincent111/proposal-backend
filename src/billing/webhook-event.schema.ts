@@ -27,7 +27,7 @@ export class WebhookEvent {
 export type WebhookEventDocument = HydratedDocument<WebhookEvent>;
 export const WebhookEventSchema = SchemaFactory.createForClass(WebhookEvent);
 
-WebhookEventSchema.index({ eventId: 1 }, { unique: true });
+// eventId's unique index comes from `unique: true` on the prop above.
 // Delivery ids stop being useful once the gateway gives up retrying; 30 days is
 // far beyond Razorpay's retry window and keeps the collection from growing.
 WebhookEventSchema.index({ processedAt: 1 }, { expireAfterSeconds: 60 * 60 * 24 * 30 });

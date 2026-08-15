@@ -25,5 +25,5 @@ export class BusinessCategory {
 export type BusinessCategoryDocument = HydratedDocument<BusinessCategory>;
 export const BusinessCategorySchema = SchemaFactory.createForClass(BusinessCategory);
 
-BusinessCategorySchema.index({ slug: 1 }, { unique: true });
+// slug's unique index comes from `unique: true` on the prop above.
 BusinessCategorySchema.index({ sortOrder: 1, name: 1 });

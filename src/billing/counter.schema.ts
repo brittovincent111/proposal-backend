@@ -21,4 +21,4 @@ export class BillingCounter {
 export type BillingCounterDocument = HydratedDocument<BillingCounter>;
 export const BillingCounterSchema = SchemaFactory.createForClass(BillingCounter);
 
-BillingCounterSchema.index({ key: 1 }, { unique: true });
+// key's unique index comes from `unique: true` on the prop above.

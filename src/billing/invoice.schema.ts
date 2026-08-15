@@ -82,7 +82,7 @@ export class Invoice {
 export type InvoiceDocument = HydratedDocument<Invoice>;
 export const InvoiceSchema = SchemaFactory.createForClass(Invoice);
 
-InvoiceSchema.index({ number: 1 }, { unique: true });
+// number's unique index comes from `unique: true` on the prop above.
 InvoiceSchema.index({ organizationId: 1, issuedAt: -1 });
 InvoiceSchema.index({ 'gateway.invoiceId': 1 }, { sparse: true });
 InvoiceSchema.index({ status: 1, paidAt: -1 });

@@ -36,4 +36,4 @@ export class Organization {
 export type OrganizationDocument = HydratedDocument<Organization>;
 export const OrganizationSchema = SchemaFactory.createForClass(Organization);
 
-OrganizationSchema.index({ slug: 1 }, { unique: true });
+// slug's unique index comes from `unique: true` on the prop above.

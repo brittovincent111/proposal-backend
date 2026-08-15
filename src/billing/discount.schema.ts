@@ -112,7 +112,7 @@ export class Discount {
 export type DiscountDocument = HydratedDocument<Discount>;
 export const DiscountSchema = SchemaFactory.createForClass(Discount);
 
-DiscountSchema.index({ code: 1 }, { unique: true });
+// code's unique index comes from `unique: true` on the prop above.
 DiscountSchema.index({ status: 1, autoApply: 1 });
 
 /**

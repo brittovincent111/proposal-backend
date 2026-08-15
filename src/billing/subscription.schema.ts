@@ -111,6 +111,6 @@ export class Subscription {
 export type SubscriptionDocument = HydratedDocument<Subscription>;
 export const SubscriptionSchema = SchemaFactory.createForClass(Subscription);
 
-SubscriptionSchema.index({ organizationId: 1 }, { unique: true });
+// organizationId's unique index comes from `unique: true` on the prop above.
 SubscriptionSchema.index({ 'gateway.subscriptionId': 1 }, { sparse: true });
 SubscriptionSchema.index({ status: 1, currentPeriodEnd: 1 });

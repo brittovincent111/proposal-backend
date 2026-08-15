@@ -130,7 +130,7 @@ export class Plan {
 export type PlanDocument = HydratedDocument<Plan>;
 export const PlanSchema = SchemaFactory.createForClass(Plan);
 
-PlanSchema.index({ code: 1 }, { unique: true });
+// code's unique index comes from `unique: true` on the prop above.
 PlanSchema.index({ status: 1, isPublic: 1, sortOrder: 1 });
 
 /** What a plan costs for a year, in minor units. */
