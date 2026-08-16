@@ -9,12 +9,8 @@ import { ErrorCodes } from 'src/common/errors/error-codes';
 import { toObjectId } from 'src/common/utils/ids';
 import { OrganizationsService } from 'src/organizations/organizations.service';
 import { HtmlRendererService } from 'src/rendering/html-renderer.service';
-import {
-  documentBodyUsesItemTable,
-  sanitiseDocumentBody,
-} from 'src/template-engine/document-body';
+import { sanitiseDocumentBody } from 'src/template-engine/document-body';
 import { DocumentCompiler } from 'src/template-engine/document.compiler';
-import { DocumentSection } from 'src/template-engine/pricing.types';
 import { TemplateSchemaValidator, ValidationReport } from 'src/template-engine/template-schema.validator';
 import {
   CreateTemplateDto,
@@ -135,19 +131,14 @@ export class TemplatesService {
     const validUntil = new Date(documentDate);
     validUntil.setDate(validUntil.getDate() + defaultValidityDays);
 
+    // A template only ever produces a proposal now, so the preview is one too.
     const compiled = this.compiler.compile({
+      kind: 'PROPOSAL',
       schema,
       fields,
       style,
       answers: this.previewAnswers(fields.fields),
-      packages: this.previewPackages(schema.blocks, templateSettings.defaultPackages),
       documentHtml: version?.documentHtml ?? '',
-      sections: this.previewSections(schema.blocks, version?.documentHtml ?? ''),
-      taxRates: [],
-      overallDiscount: { mode: 'PERCENT', value: 0 },
-      charges: [],
-      taxInclusive: templateSettings.defaultTaxInclusive ?? settings.defaultTaxInclusive,
-      roundOff: templateSettings.defaultRoundOff ?? settings.defaultRoundOff,
       meta: {
         documentNumber: 'TEMPLATE-PREVIEW',
         documentDate,
@@ -685,122 +676,6 @@ export class TemplatesService {
     if (source.includes('venue')) return 'Grand Convention Hall';
     if (source.includes('finish')) return 'Acrylic';
     return label;
-  }
-
-  private previewPackages(
-    blocks: Array<Record<string, unknown>>,
-    defaultPackages: Array<Record<string, unknown>> = [],
-  ) {
-    const needsPackageContent = blocks.some((block) =>
-      String(block.type ?? '') === 'package',
-    );
-    if (!needsPackageContent) return [];
-
-    if (defaultPackages.length) {
-      return defaultPackages.map((entry, index) => ({
-        id: String(entry.id ?? `preview-package-${index + 1}`),
-        name: String(entry.name ?? `Package ${index + 1}`),
-        description: String(entry.description ?? ''),
-        lineIds: Array.isArray(entry.lines)
-          ? entry.lines.map((line, lineIndex) =>
-              String((line as Record<string, unknown>).lineId ?? `preview-line-${index + 1}-${lineIndex + 1}`),
-            )
-          : [],
-      }));
-    }
-
-    return [
-      {
-        id: 'preview-package',
-        name: 'Signature Package',
-        description: 'Sample package summary used to preview linked package content.',
-        lineIds: ['preview-line-base', 'preview-line-optional'],
-      },
-    ];
-  }
-
-  private previewSections(
-    blocks: Array<Record<string, unknown>>,
-    documentHtml: string,
-  ): DocumentSection[] {
-    // A document-authored template prices through an item table in its body, so
-    // that counts as pricing too — otherwise its preview shows an empty table.
-    const hasPricing =
-      blocks.some((block) => String(block.type ?? '') === 'pricingTable') ||
-      documentBodyUsesItemTable(documentHtml);
-    if (!hasPricing) return [];
-
-    return [
-      {
-        id: 'preview-section',
-        title: 'Preview Items',
-        lines: [
-          {
-            id: 'preview-line-base',
-            kind: 'ITEM',
-            itemId: null,
-            packageId: 'preview-package',
-            packageName: 'Signature Package',
-            name: 'Base package',
-            description: 'Primary priced line for previewing the layout.',
-            unit: 'nos',
-            pricingMode: 'FIXED',
-            quantity: 1,
-            days: 1,
-            rate: 4800000,
-            percent: 0,
-            formula: '',
-            manualAmount: 0,
-            discount: { mode: 'PERCENT', value: 0 },
-            taxRateId: null,
-            optional: false,
-            selected: true,
-          },
-          {
-            id: 'preview-line-transfer',
-            kind: 'ITEM',
-            itemId: null,
-            packageId: null,
-            packageName: '',
-            name: 'Transfers',
-            description: 'Secondary line to show multi-row pricing.',
-            unit: 'nos',
-            pricingMode: 'FIXED',
-            quantity: 1,
-            days: 1,
-            rate: 1200000,
-            percent: 0,
-            formula: '',
-            manualAmount: 0,
-            discount: { mode: 'PERCENT', value: 0 },
-            taxRateId: null,
-            optional: false,
-            selected: true,
-          },
-          {
-            id: 'preview-line-optional',
-            kind: 'ITEM',
-            itemId: null,
-            packageId: null,
-            packageName: '',
-            name: 'Optional add-on',
-            description: 'Shown separately so optional pricing stays visible.',
-            unit: 'nos',
-            pricingMode: 'FIXED',
-            quantity: 1,
-            days: 1,
-            rate: 800000,
-            percent: 0,
-            formula: '',
-            manualAmount: 0,
-            discount: { mode: 'PERCENT', value: 0 },
-            taxRateId: null,
-            optional: true,
-            selected: false,
-          },
-        ],
-      },
-    ];
   }
 
   /**

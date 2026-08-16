@@ -16,11 +16,19 @@ import { PdfService } from 'src/rendering/pdf.service';
 import { ReusableBlocksService } from 'src/reusable-blocks/reusable-blocks.service';
 import { ReusableBlockResolver } from 'src/template-engine/reusable-block.resolver';
 import { TemplatesService } from 'src/templates/templates.service';
-import { documentBodyUsesItemTable } from 'src/template-engine/document-body';
-import { CompiledDocument, DocumentCompiler } from 'src/template-engine/document.compiler';
+import {
+  CompiledDocument,
+  CompileMeta,
+  DocumentCompiler,
+} from 'src/template-engine/document.compiler';
 import { PackageResolver } from 'src/template-engine/package.resolver';
 import { PricingCalculator } from 'src/template-engine/pricing.calculator';
-import { DocumentSection, Discount, ExtraCharge } from 'src/template-engine/pricing.types';
+import {
+  DocumentSection,
+  Discount,
+  ExtraCharge,
+  emptyTotals,
+} from 'src/template-engine/pricing.types';
 import { TemplateSchemaValidator, formatZodError } from 'src/template-engine/template-schema.validator';
 import {
   TemplateBlock,
@@ -898,55 +906,25 @@ export class DocumentsService {
    * customer to address it to, and no lines to price — and stays out of the way
    * otherwise. A zero-value quotation is legitimate (a goodwill job, a revised
    * scope) so the value itself is not checked.
+   *
+   * This used to fetch the pinned template version and scan its blocks for a
+   * pricing table, because "does this document show prices?" had no other answer.
+   * The kind is that answer.
    */
-  private async assertSendable(
-    organizationId: string,
-    document: ProposalDocumentDocument,
-  ): Promise<void> {
+  private assertSendable(document: ProposalDocumentDocument): void {
     if (!document.customerSnapshot?.name && !document.customerSnapshot?.companyName) {
       throw DomainException.invalid(
         ErrorCodes.VALIDATION_FAILED,
-        'Add a customer before sending this quotation.',
+        'Add a customer before sending this document.',
       );
     }
 
-    /*
-     * Lines are only required when the document actually shows prices.
-     *
-     * A scope letter or a covering proposal is a legitimate document with no
-     * pricing table in its template, and demanding a line item made those
-     * impossible to send. So the rule follows the template: if it prints a price
-     * table, it needs something to put in it.
-     */
-    if (!this.hasPricedLines(document) && (await this.printsPricing(organizationId, document))) {
+    if (document.kind === 'QUOTATION' && !this.hasPricedLines(document)) {
       throw DomainException.invalid(
         ErrorCodes.VALIDATION_FAILED,
-        'This quotation shows a price table but has no items in it. Add an item, or remove the pricing block from its template.',
+        'This quotation has no items in it. Add an item before sending.',
       );
     }
-  }
-
-  /** Whether the pinned template puts a price table in the document. */
-  private async printsPricing(
-    organizationId: string,
-    document: ProposalDocumentDocument,
-  ): Promise<boolean> {
-    if (!document.templateVersionId) {
-      // No template means the compiler's fallback body, which does print prices.
-      return true;
-    }
-
-    const version = await this.templates
-      .requireVersion(organizationId, document.templateVersionId)
-      .catch(() => null);
-    if (!version) return true;
-
-    // A document-authored template prices through an item table in its body
-    // rather than a block, and needs items just as much.
-    if (documentBodyUsesItemTable(version.documentHtml ?? '')) return true;
-
-    const schema = this.validator.parseDocumentSchema(version.schemaJson);
-    return schema.blocks.some((block) => block.type === 'pricingTable');
   }
 
   /* --------------------------------------------------------------- generate */
@@ -974,7 +952,6 @@ export class DocumentsService {
     }
 
     const previous = await this.previousRevision(document, current?.revisionNumber ?? null);
-    const totals = compiled.pricing.totals;
     const payload = {
       documentId: document._id,
       organizationId: document.organizationId,
@@ -982,22 +959,14 @@ export class DocumentsService {
       templateVersionId: document.templateVersionId,
       inputValuesJson: document.draft.answers,
       resolvedDocumentJson: compiled as unknown as Record<string, unknown>,
-      pricingSnapshotJson: {
-        sections: compiled.pricing.sections,
-        totals,
-        taxInclusive: compiled.pricing.taxInclusive,
-      },
       styleSnapshotJson: compiled.style as unknown as Record<string, unknown>,
-      subtotal: totals.subtotal,
-      discountTotal: totals.discountTotal,
-      taxTotal: totals.taxTotal,
-      grandTotal: totals.grandTotal,
+      ...this.revisionPricing(compiled),
       createdById: new Types.ObjectId(userId),
     };
 
     const changeSummary = this.diffs.compare(
       previous,
-      { ...payload, ...totals },
+      { ...payload, ...payload.pricingSnapshotJson.totals },
       document.currency,
       document.locale,
     );
@@ -1019,7 +988,7 @@ export class DocumentsService {
 
     document.currentRevisionId = revision._id;
     document.currentRevisionNumber = revision.revisionNumber;
-    document.draftTotals = totals as never;
+    document.draftTotals = payload.pricingSnapshotJson.totals as never;
     await document.save();
 
     await this.recordEvent(document, 'GENERATED', userId, revision._id);
@@ -1045,7 +1014,7 @@ export class DocumentsService {
 
     const compiled = await this.compile(organizationId, document);
     const previous = await this.revisions.findById(document.currentRevisionId).lean();
-    const totals = compiled.pricing.totals;
+    const pricing = this.revisionPricing(compiled);
 
     const payload = {
       documentId: document._id,
@@ -1054,16 +1023,8 @@ export class DocumentsService {
       templateVersionId: document.templateVersionId,
       inputValuesJson: document.draft.answers,
       resolvedDocumentJson: compiled as unknown as Record<string, unknown>,
-      pricingSnapshotJson: {
-        sections: compiled.pricing.sections,
-        totals,
-        taxInclusive: compiled.pricing.taxInclusive,
-      },
       styleSnapshotJson: compiled.style as unknown as Record<string, unknown>,
-      subtotal: totals.subtotal,
-      discountTotal: totals.discountTotal,
-      taxTotal: totals.taxTotal,
-      grandTotal: totals.grandTotal,
+      ...pricing,
       createdById: new Types.ObjectId(userId),
     };
 
@@ -1073,7 +1034,7 @@ export class DocumentsService {
         reason: dto.reason ?? '',
         ...this.diffs.compare(
           previous,
-          { ...payload, ...totals },
+          { ...payload, ...payload.pricingSnapshotJson.totals },
           document.currency,
           document.locale,
         ),
@@ -1083,7 +1044,7 @@ export class DocumentsService {
     document.currentRevisionId = revision._id;
     document.currentRevisionNumber = revision.revisionNumber;
     document.status = 'DRAFT';
-    document.draftTotals = totals as never;
+    document.draftTotals = payload.pricingSnapshotJson.totals as never;
     await document.save();
 
     await this.recordEvent(document, 'REVISION_CREATED', userId, revision._id);
@@ -1149,7 +1110,7 @@ export class DocumentsService {
       );
     }
     this.transitions.assertCanTransition(document.status, 'SENT');
-    await this.assertSendable(organizationId, document);
+    this.assertSendable(document);
 
     if (!document.currentRevisionId) await this.generate(organizationId, id, userId);
     const fresh = await this.get(organizationId, id);
@@ -1248,11 +1209,27 @@ export class DocumentsService {
 
   /* --------------------------------------------------------------- internals */
 
-  /** Runs the full compile for the *current draft* against its pinned template version. */
+  /** Runs the full compile for the *current draft*, by kind. */
   private async compile(
     organizationId: string,
     document: ProposalDocumentDocument,
   ): Promise<CompiledDocument> {
+    const meta = this.compileMeta(document);
+
+    if (document.kind === 'QUOTATION') {
+      return this.compiler.compile({
+        kind: 'QUOTATION',
+        style: this.validator.parseStyleSchema(undefined),
+        sections: this.parseSections(document.draft.sections),
+        taxRates: await this.catalog.taxSnapshots(organizationId),
+        overallDiscount: this.parseDiscount(document.draft.overallDiscount),
+        charges: this.parseCharges(document.draft.charges),
+        taxInclusive: document.draft.taxInclusive,
+        roundOff: document.draft.roundOff,
+        meta,
+      });
+    }
+
     const version = document.templateVersionId
       ? await this.templates.requireVersion(organizationId, document.templateVersionId)
       : null;
@@ -1274,50 +1251,82 @@ export class DocumentsService {
     this.variables.assertAnswersValid(fields, answers);
 
     return this.compiler.compile({
+      kind: 'PROPOSAL',
       schema,
       fields,
       style,
       answers,
-      // Read from the pinned version, so a quotation prints the body that was
+      // Read from the pinned version, so a proposal prints the body that was
       // published when it was created — not whatever the template says today.
       documentHtml: version?.documentHtml ?? '',
-      packages: this.parsePackageSnapshots(document.draft.packageSnapshots),
-      sections: this.parseSections(document.draft.sections),
-      taxRates: await this.catalog.taxSnapshots(organizationId),
-      overallDiscount: this.parseDiscount(document.draft.overallDiscount),
-      charges: this.parseCharges(document.draft.charges),
-      taxInclusive: document.draft.taxInclusive,
-      roundOff: document.draft.roundOff,
-      meta: {
-        documentNumber: document.documentNumber,
-        documentDate: document.validFrom,
-        validUntil: document.validUntil,
-        currency: document.currency,
-        locale: document.locale,
-        title: document.title,
-        reference: document.reference,
-        customer: {
-          name: document.customerSnapshot.name,
-          companyName: document.customerSnapshot.companyName,
-          email: document.customerSnapshot.email,
-          phone: document.customerSnapshot.phone,
-          billingAddress: document.customerSnapshot.billingAddress,
-        },
-        company: {
-          name: document.companySnapshot.name,
-          address: document.companySnapshot.address,
-          phone: document.companySnapshot.phone,
-          email: document.companySnapshot.email,
-          website: document.companySnapshot.website,
-          taxNumber: document.companySnapshot.taxNumber,
-          logoUrl: document.companySnapshot.logoUrl,
-          accentColor: document.companySnapshot.accentColor,
-        },
-        terms: document.draft.terms,
-        paymentTerms: document.draft.paymentTerms,
-        customerNotes: document.draft.customerNotes,
-      },
+      meta,
     });
+  }
+
+  /** The letterhead, parties and closing content, identical for both kinds. */
+  private compileMeta(document: ProposalDocumentDocument): CompileMeta {
+    return {
+      documentNumber: document.documentNumber,
+      documentDate: document.validFrom,
+      validUntil: document.validUntil,
+      currency: document.currency,
+      locale: document.locale,
+      title: document.title,
+      reference: document.reference,
+      customer: {
+        name: document.customerSnapshot.name,
+        companyName: document.customerSnapshot.companyName,
+        email: document.customerSnapshot.email,
+        phone: document.customerSnapshot.phone,
+        billingAddress: document.customerSnapshot.billingAddress,
+      },
+      company: {
+        name: document.companySnapshot.name,
+        address: document.companySnapshot.address,
+        phone: document.companySnapshot.phone,
+        email: document.companySnapshot.email,
+        website: document.companySnapshot.website,
+        taxNumber: document.companySnapshot.taxNumber,
+        logoUrl: document.companySnapshot.logoUrl,
+        accentColor: document.companySnapshot.accentColor,
+      },
+      terms: document.draft.terms,
+      paymentTerms: document.draft.paymentTerms,
+      customerNotes: document.draft.customerNotes,
+    };
+  }
+
+  /**
+   * The priced half of a revision payload, or its absence.
+   *
+   * A proposal has no totals to freeze, so it writes an empty snapshot and leaves
+   * the four denormalised columns at the schema's zero default. Anything reading a
+   * proposal revision must therefore check `kind` rather than trusting a 0 to mean
+   * "free" — `publicPayload` is the one that matters, and it returns null.
+   */
+  private revisionPricing(compiled: CompiledDocument) {
+    if (compiled.kind === 'PROPOSAL') {
+      return {
+        pricingSnapshotJson: { sections: [], totals: emptyTotals(), taxInclusive: false },
+        subtotal: 0,
+        discountTotal: 0,
+        taxTotal: 0,
+        grandTotal: 0,
+      };
+    }
+
+    const totals = compiled.pricing.totals;
+    return {
+      pricingSnapshotJson: {
+        sections: compiled.pricing.sections,
+        totals,
+        taxInclusive: compiled.pricing.taxInclusive,
+      },
+      subtotal: totals.subtotal,
+      discountTotal: totals.discountTotal,
+      taxTotal: totals.taxTotal,
+      grandTotal: totals.grandTotal,
+    };
   }
 
   /** Totals for the draft, without requiring answers to be complete yet. */

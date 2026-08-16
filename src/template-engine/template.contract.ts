@@ -100,8 +100,6 @@ export const BlockTypes = [
   'dynamicField',
   'table',
   'repeatingList',
-  'pricingTable',
-  'package',
   'terms',
   'payment',
   'gallery',

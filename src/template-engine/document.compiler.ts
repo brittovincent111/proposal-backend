@@ -7,7 +7,6 @@ import {
   hasDocumentBody,
   sanitiseDocumentBody,
 } from './document-body';
-import { formatMinor } from './money';
 import { PricingCalculator } from './pricing.calculator';
 import {
   DocumentSection,
@@ -24,19 +23,56 @@ import {
 } from './template.contract';
 import {
   blocksConsumeClosingSections,
-  CompilePackageSnapshot,
   isBoundFieldBlockType,
   resolvedBlockCarriesContent,
   templateBlockDefinition,
 } from './template-block.registry';
 import { Answers, VariableResolver } from './variable.resolver';
 
-export interface CompileInput {
+export interface CompileMeta {
+  documentNumber: string;
+  documentDate: Date;
+  validUntil: Date;
+  currency: string;
+  locale: string;
+  /** Optional so revisions compiled before these were captured still render. */
+  title?: string;
+  reference?: string;
+  customer: {
+    name: string;
+    companyName: string;
+    email: string;
+    phone: string;
+    billingAddress: string;
+  };
+  company: {
+    name: string;
+    address: string;
+    phone: string;
+    email: string;
+    website?: string;
+    taxNumber?: string;
+    logoUrl?: string | null;
+    accentColor?: string;
+  };
+  terms: string;
+  paymentTerms: string;
+  customerNotes: string;
+}
+
+/**
+ * A proposal: a template, its answers, and nothing that costs money.
+ *
+ * There is no `sections` member, so the proposal branch of the compiler has
+ * nothing to price even if someone tried. That is the hard wall, expressed as a
+ * type rather than as a rule someone has to remember.
+ */
+export interface ProposalCompileInput {
+  kind: 'PROPOSAL';
   schema: DocumentSchemaJson;
   fields: FieldSchemaJson;
   style: StyleSchemaJson;
   answers: Answers;
-  packages: CompilePackageSnapshot[];
   /**
    * A template authored as a free-form document rather than as blocks.
    *
@@ -44,45 +80,23 @@ export interface CompileInput {
    * authored before the document editor existed keeps compiling unchanged.
    */
   documentHtml?: string;
+  meta: CompileMeta;
+}
 
+/** A quotation: priced lines and a fixed layout. No template, so no `schema`. */
+export interface QuotationCompileInput {
+  kind: 'QUOTATION';
+  style: StyleSchemaJson;
   sections: DocumentSection[];
   taxRates: TaxRateSnapshot[];
   overallDiscount: Discount;
   charges: ExtraCharge[];
   taxInclusive: boolean;
   roundOff: boolean;
-
-  meta: {
-    documentNumber: string;
-    documentDate: Date;
-    validUntil: Date;
-    currency: string;
-    locale: string;
-    /** Optional so revisions compiled before these were captured still render. */
-    title?: string;
-    reference?: string;
-    customer: {
-      name: string;
-      companyName: string;
-      email: string;
-      phone: string;
-      billingAddress: string;
-    };
-    company: {
-      name: string;
-      address: string;
-      phone: string;
-      email: string;
-      website?: string;
-      taxNumber?: string;
-      logoUrl?: string | null;
-      accentColor?: string;
-    };
-    terms: string;
-    paymentTerms: string;
-    customerNotes: string;
-  };
+  meta: CompileMeta;
 }
+
+export type CompileInput = ProposalCompileInput | QuotationCompileInput;
 
 export interface ResolvedBlock {
   id: string;
@@ -99,18 +113,24 @@ export interface ResolvedBlock {
   newPage?: boolean;
 }
 
-export interface CompiledDocument {
+interface CompiledCommon {
   schemaVersion: number;
-  blocks: ResolvedBlock[];
-  pricing: {
-    sections: DocumentSection[];
-    totals: DocumentTotals;
-    currency: string;
-    locale: string;
-    taxInclusive: boolean;
-  };
-  meta: CompileInput['meta'] & { visibleFieldKeys: string[] };
+  meta: CompileMeta & { visibleFieldKeys: string[] };
   style: StyleSchemaJson;
+}
+
+/**
+ * Deliberately has no `pricing` member — not even an optional one.
+ *
+ * An optional field would let `compiled.pricing?.totals` slide through every
+ * reader untouched, and the wall would survive only as a convention. Because the
+ * member is absent from the type, `compiled.pricing` is a compile error until the
+ * caller narrows on `kind`, which is what makes the compiler enumerate the
+ * readers instead of a person having to.
+ */
+export interface CompiledProposal extends CompiledCommon {
+  kind: 'PROPOSAL';
+  blocks: ResolvedBlock[];
   /**
    * The document-authored body, sanitised with its field values already filled
    * in. Present only for document-authored templates; when it is, the renderer
@@ -126,37 +146,36 @@ export interface CompiledDocument {
   consumed?: { terms?: boolean; paymentTerms?: boolean };
 }
 
+export interface CompiledQuotation extends CompiledCommon {
+  kind: 'QUOTATION';
+  pricing: {
+    sections: DocumentSection[];
+    totals: DocumentTotals;
+    currency: string;
+    locale: string;
+    taxInclusive: boolean;
+  };
+}
+
+export type CompiledDocument = CompiledProposal | CompiledQuotation;
+
 /**
- * The body every quotation falls back to: an address line and the prices.
+ * What a proposal prints when its every authored block was conditionally hidden.
  *
- * Reached when a document has no template pinned, or when conditions hid every
- * authored block. Both cases used to produce a document with no line items,
- * which is the one output a quotation must never have.
+ * The quotation half of this constant is gone: a quotation has no block list to
+ * fall back into, because its layout is fixed and lives in the renderer. What
+ * remains is a courtesy rather than the money-safety guarantee it used to be —
+ * an empty proposal is an authoring mistake, but a customer opening a literally
+ * blank PDF is still the worst outcome available, and this is four lines.
  */
-const FALLBACK_BLOCKS: TemplateBlock[] = [
+const PROPOSAL_FALLBACK_BLOCKS: TemplateBlock[] = [
   {
     id: 'fallback-intro',
     type: 'text',
     label: '',
     refId: '',
     fieldKey: '',
-    content:
-      'Dear {{customer_name}}, thank you for the opportunity. Our quotation is set out below.',
-    items: [],
-    width: 'full',
-    align: 'left',
-    spacing: 'normal',
-    emphasis: 'normal',
-    newPage: false,
-    condition: null,
-  },
-  {
-    id: 'fallback-pricing',
-    type: 'pricingTable',
-    label: '',
-    refId: '',
-    fieldKey: '',
-    content: '',
+    content: 'Dear {{customer_name}}, thank you for the opportunity.',
     items: [],
     width: 'full',
     align: 'left',
@@ -182,17 +201,21 @@ export class DocumentCompiler {
   ) {}
 
   compile(input: CompileInput): CompiledDocument {
-    // Pricing runs first: totals are themselves variables the body can print.
-    const preliminary = this.pricing.calculate({
-      sections: input.sections,
-      taxRates: input.taxRates,
-      overallDiscount: input.overallDiscount,
-      charges: input.charges,
-      taxInclusive: input.taxInclusive,
-      roundOff: input.roundOff,
-    });
+    return input.kind === 'QUOTATION'
+      ? this.compileQuotation(input)
+      : this.compileProposal(input);
+  }
 
-    const money = (amount: number) => formatMinor(amount, input.meta.currency, input.meta.locale);
+  /**
+   * A proposal: variables in, words out. The pricing calculator is never called.
+   *
+   * `reserved` carries no money keys, so a template that still says
+   * `{{grand_total}}` prints nothing rather than a number — `interpolate` and
+   * `fillDocumentFields` both resolve an unknown key to ''. The template
+   * validator rejects those four names at publish, so this is the second line of
+   * defence rather than the first.
+   */
+  private compileProposal(input: ProposalCompileInput): CompiledProposal {
     const reserved: Record<string, string | number> = {
       customer_name: input.meta.customer.name,
       customer_company: input.meta.customer.companyName,
@@ -204,10 +227,6 @@ export class DocumentCompiler {
       document_number: input.meta.documentNumber,
       document_date: input.meta.documentDate.toISOString().slice(0, 10),
       valid_until: input.meta.validUntil.toISOString().slice(0, 10),
-      subtotal: money(preliminary.subtotal),
-      discount_total: money(preliminary.discountTotal),
-      tax_total: money(preliminary.taxTotal),
-      grand_total: money(preliminary.grandTotal),
     };
 
     const resolved = this.variables.resolve(input.fields, input.answers, {
@@ -216,40 +235,18 @@ export class DocumentCompiler {
       reserved,
     });
 
-    // Formula-priced lines can reference answers, so pricing is recomputed once
-    // the scope exists. Reserved totals are strings and never feed back in, which
-    // is what keeps this from needing a fixed point.
-    const totals = this.pricing.calculate({
-      sections: input.sections,
-      taxRates: input.taxRates,
-      overallDiscount: input.overallDiscount,
-      charges: input.charges,
-      taxInclusive: input.taxInclusive,
-      roundOff: input.roundOff,
-      scope: resolved.numeric,
-    });
-
     // A document-authored template carries its whole body as HTML. Field values
-    // are substituted here so the revision is self-contained; the item table is
-    // left as a marker for the renderer, which owns pricing markup.
+    // are substituted here so the revision is self-contained.
     const authoredBody = hasDocumentBody(input.documentHtml)
       ? sanitiseDocumentBody(input.documentHtml as string)
       : '';
     const body = authoredBody
       ? fillDocumentFields(authoredBody, {
-          // Answers first: a reserved key always wins, so an invented field
-          // named `grand_total` cannot overwrite the real total.
           ...resolved.text,
-          ...this.documentFieldValues(input, totals, money),
+          ...this.documentFieldValues(input.meta),
         })
       : undefined;
 
-    // A document with no template — or a template whose every block is
-    // conditionally hidden — would otherwise compile to an empty body and be
-    // sent to a customer with no prices in it. The fallback body is the minimum
-    // a quotation must always contain, and it is baked into the revision so what
-    // was sent stays reproducible. A document body is content in its own right,
-    // so it is not replaced by the fallback.
     const authored = input.schema.blocks
       .filter((block) => this.conditions.evaluate(block.condition, input.answers))
       .map((block) => this.resolveBlock(block, resolved.text, input));
@@ -257,13 +254,44 @@ export class DocumentCompiler {
     const blocks =
       body || authored.some(resolvedBlockCarriesContent)
         ? authored
-        : FALLBACK_BLOCKS.map((block) => this.resolveBlock(block, resolved.text, input));
-    const pagedBlocks = this.promoteCommercialSections(blocks);
+        : PROPOSAL_FALLBACK_BLOCKS.map((block) => this.resolveBlock(block, resolved.text, input));
 
     return {
+      kind: 'PROPOSAL',
       schemaVersion: input.schema.schemaVersion,
-      blocks: pagedBlocks,
+      blocks,
       body,
+      meta: { ...input.meta, visibleFieldKeys: resolved.visibleFieldKeys },
+      style: input.style,
+      // Read from the body before substitution: filling replaces the very
+      // markers this inspects.
+      consumed: authoredBody
+        ? this.bodyConsumesClosingSections(authoredBody)
+        : blocksConsumeClosingSections(blocks),
+    };
+  }
+
+  /**
+   * A quotation: one pricing pass, and no blocks at all.
+   *
+   * The old two-pass structure existed because formula-priced lines could
+   * reference template answers, so pricing had to run once to seed the reserved
+   * totals and again with the resolved scope. A quotation has no template and
+   * therefore no answers, so a single pass reaches the same fixed point.
+   */
+  private compileQuotation(input: QuotationCompileInput): CompiledQuotation {
+    const totals = this.pricing.calculate({
+      sections: input.sections,
+      taxRates: input.taxRates,
+      overallDiscount: input.overallDiscount,
+      charges: input.charges,
+      taxInclusive: input.taxInclusive,
+      roundOff: input.roundOff,
+    });
+
+    return {
+      kind: 'QUOTATION',
+      schemaVersion: 1,
       pricing: {
         sections: input.sections,
         totals,
@@ -271,13 +299,8 @@ export class DocumentCompiler {
         locale: input.meta.locale,
         taxInclusive: input.taxInclusive,
       },
-      meta: { ...input.meta, visibleFieldKeys: resolved.visibleFieldKeys },
+      meta: { ...input.meta, visibleFieldKeys: [] },
       style: input.style,
-      // Read from the body before substitution: filling replaces the very
-      // markers this inspects.
-      consumed: authoredBody
-        ? this.bodyConsumesClosingSections(authoredBody)
-        : blocksConsumeClosingSections(pagedBlocks),
     };
   }
 
@@ -289,12 +312,7 @@ export class DocumentCompiler {
    * details that no block type ever needed. Anything absent resolves to '' and
    * prints nothing.
    */
-  private documentFieldValues(
-    input: CompileInput,
-    totals: DocumentTotals,
-    money: (amount: number) => string,
-  ): Record<string, string> {
-    const meta = input.meta;
+  private documentFieldValues(meta: CompileMeta): Record<string, string> {
     const { customer, company } = meta;
     return {
       customer_name: customer.name,
@@ -313,11 +331,6 @@ export class DocumentCompiler {
       company_phone: company.phone,
       company_email: company.email,
       company_tax_number: company.taxNumber ?? '',
-
-      subtotal: money(totals.subtotal),
-      discount_total: money(totals.discountTotal),
-      tax_total: money(totals.taxTotal),
-      grand_total: money(totals.grandTotal),
 
       terms: meta.terms,
       payment_terms: meta.paymentTerms,
@@ -338,7 +351,7 @@ export class DocumentCompiler {
   private resolveBlock(
     block: TemplateBlock,
     scope: Record<string, string>,
-    input: CompileInput,
+    input: ProposalCompileInput,
   ): ResolvedBlock {
     const definition = templateBlockDefinition(block.type);
     const boundField = block.fieldKey
@@ -389,33 +402,6 @@ export class DocumentCompiler {
     return scope[block.fieldKey] ?? '';
   }
 
-  /**
-   * Narrative-heavy proposals read better when pricing starts its own page.
-   *
-   * The heuristic is intentionally conservative: at least two content blocks
-   * must exist before pricing, otherwise the simple fallback body and short
-   * one-section quotes would turn into unnecessary two-page documents.
-   */
-  private promoteCommercialSections(blocks: ResolvedBlock[]): ResolvedBlock[] {
-    const pricingIndex = blocks.findIndex((block) => templateBlockDefinition(block.type).commercialAnchor);
-    if (pricingIndex === -1) return blocks;
-    if (blocks[pricingIndex].newPage) return blocks;
-
-    const priorContentIndexes = blocks
-      .slice(0, pricingIndex)
-      .flatMap((block, index) => (resolvedBlockCarriesContent(block) ? [index] : []));
-    if (priorContentIndexes.length < 2) return blocks;
-
-    const lastNarrativeIndex = priorContentIndexes[priorContentIndexes.length - 1];
-    const explicitBreak = blocks
-      .slice(lastNarrativeIndex + 1, pricingIndex + 1)
-      .some((block) => templateBlockDefinition(block.type).explicitPageBreak || block.newPage);
-    if (explicitBreak) return blocks;
-
-    return blocks.map((block, index) =>
-      index === pricingIndex ? { ...block, newPage: true } : block,
-    );
-  }
 }
 
 function uniqueStrings(values: string[]) {
