@@ -27,18 +27,29 @@ describe('a styled dynamic field, from editor output to rendered page', () => {
   const renderer = new HtmlRendererService();
 
   // Copied verbatim from a real editor's getHTML() for a styled, bolded token.
+  // An operator-answered field, not a computed total: a proposal never prints
+  // one, and the styling round-trip this guards is the same either way.
   const EDITOR_OUTPUT =
     '<table><tbody><tr><td><p><strong><span style="font-size: 20px; color: rgb(11, 92, 173);">₹' +
-    '<span data-dynamic-field="grand_total" data-label="amount value" data-field-type="text" class="qtn-token" data-token="true">amount value</span>' +
+    '<span data-dynamic-field="annual_price" data-label="amount value" data-field-type="text" class="qtn-token" data-token="true">amount value</span>' +
     ' / year</span></strong></p></td></tr></tbody></table>';
 
   const input: CompileInput = {
+    kind: 'PROPOSAL',
     schema: validator.parseDocumentSchema({ blocks: [] }),
-    fields: validator.parseFieldSchema({}),
+    fields: validator.parseFieldSchema({
+      fields: [
+        {
+          id: 'f1',
+          key: 'annual_price',
+          label: 'Annual price',
+          type: 'CURRENCY',
+        },
+      ],
+    }),
     style: validator.parseStyleSchema({}),
-    answers: {},
-    packages: [],
-    sections: [
+    answers: { annual_price: 2990 },
+    unusedSections: [
       {
         id: 's1',
         title: 'Items',
@@ -84,6 +95,7 @@ describe('a styled dynamic field, from editor output to rendered page', () => {
 
   it('carries the wrapper all the way to the rendered page', () => {
     const compiled = compiler.compile(input);
+    if (compiled.kind !== 'PROPOSAL') throw new Error('expected a proposal');
     const page = renderer.render(compiled);
 
     // Sanitising normalises the spacing, so match on the declarations.
