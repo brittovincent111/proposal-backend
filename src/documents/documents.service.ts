@@ -205,17 +205,21 @@ export class DocumentsService {
     let terms = settings.defaultTerms;
     let paymentTerms = settings.defaultPaymentTerms;
     let validityDays = settings.defaultValidityDays;
-    let taxInclusive = settings.defaultTaxInclusive;
-    let roundOff = settings.defaultRoundOff;
-    const defaultTaxRateId = settings.defaultTaxRateId?.toString() ?? null;
-    /** Lines the template starts every quotation with, snapshotted by value. */
-    let templateLines: DocumentSection['lines'] = [];
-    let templatePackageSnapshots: Array<Record<string, unknown>> = [];
 
-    // An unnamed template falls back to the organization's default, so the
-    // ordinary case needs no template decision at all. A default that has since
-    // been archived is ignored rather than failing the create.
-    const requestedTemplateId = dto.templateId ?? settings.defaultTemplateId?.toString();
+    if (dto.kind === 'QUOTATION' && dto.templateId) {
+      throw DomainException.invalid(
+        ErrorCodes.VALIDATION_FAILED,
+        'A quotation has no template — its layout is fixed. Create a proposal to use a template.',
+      );
+    }
+
+    // A proposal without a named template falls back to the organization's
+    // default. A default that has since been archived is ignored rather than
+    // failing the create.
+    const requestedTemplateId =
+      dto.kind === 'PROPOSAL'
+        ? dto.templateId ?? settings.defaultTemplateId?.toString()
+        : undefined;
 
     if (requestedTemplateId) {
       const resolved = await this.templates
@@ -235,16 +239,6 @@ export class DocumentsService {
         terms = templateSettings.defaultTerms || terms;
         paymentTerms = templateSettings.defaultPaymentTerms || paymentTerms;
         validityDays = templateSettings.defaultValidityDays ?? validityDays;
-        taxInclusive = templateSettings.defaultTaxInclusive ?? taxInclusive;
-        roundOff = templateSettings.defaultRoundOff ?? roundOff;
-        ({ lines: templateLines, packageSnapshots: templatePackageSnapshots } =
-          await this.resolveTemplateDefaults(
-            organizationId,
-            templateSettings.defaultPackages,
-            templateSettings.defaultPackageIds,
-            version.linesJson,
-            defaultTaxRateId,
-          ));
       }
     }
 
@@ -282,13 +276,18 @@ export class DocumentsService {
       validFrom: now,
       validUntil: dto.validUntil ? new Date(dto.validUntil) : addDays(now, validityDays),
       draft: {
-        answers: dto.answers ? this.parseAnswers(dto.answers) : {},
-        sections: [{ id: nextLocalId('sec'), title: 'Items', lines: templateLines }],
-        packageSnapshots: templatePackageSnapshots,
-        overallDiscount: { mode: 'PERCENT', value: 0 },
-        charges: [],
-        taxInclusive,
-        roundOff,
+        // Each kind writes only its own half. A proposal gets no `sections` at
+        // all rather than an empty one, so nothing downstream can mistake it for
+        // a quotation that happens to have no items yet.
+        ...(dto.kind === 'PROPOSAL'
+          ? { answers: dto.answers ? this.parseAnswers(dto.answers) : {} }
+          : {
+              sections: [{ id: nextLocalId('sec'), title: 'Items', lines: [] }],
+              overallDiscount: { mode: 'PERCENT', value: 0 },
+              charges: [],
+              taxInclusive: settings.defaultTaxInclusive,
+              roundOff: settings.defaultRoundOff,
+            }),
         terms,
         paymentTerms,
       },
@@ -365,36 +364,8 @@ export class DocumentsService {
           }
           document.draft.terms = templateSettings.defaultTerms || document.draft.terms;
           document.draft.paymentTerms = templateSettings.defaultPaymentTerms || document.draft.paymentTerms;
-          document.draft.taxInclusive = templateSettings.defaultTaxInclusive ?? document.draft.taxInclusive;
-          document.draft.roundOff = templateSettings.defaultRoundOff ?? document.draft.roundOff;
         }
 
-        /*
-         * Seed the template's default lines.
-         *
-         * Only into a quotation that has no priced lines yet: switching template on a
-         * quotation somebody has already built would otherwise wipe or duplicate
-         * their work. An empty one is the case where seeding is obviously wanted, and
-         * it is what "choose a template and the items appear" means.
-         */
-        if (!this.hasPricedLines(document)) {
-          const orgSettings = await this.organizations.getSettings(organizationId);
-          const templateSettings = this.validator.parseSettings(version.settingsJson);
-          const seeded = await this.resolveTemplateDefaults(
-            organizationId,
-            templateSettings.defaultPackages,
-            templateSettings.defaultPackageIds,
-            version.linesJson,
-            orgSettings.defaultTaxRateId?.toString() ?? null,
-          );
-
-          const sections = this.parseSections(document.draft.sections);
-          const target = sections[0] ?? { id: nextLocalId('sec'), title: 'Items', lines: [] };
-          target.lines = seeded.lines;
-          if (!sections.includes(target)) sections.push(target);
-          document.draft.sections = sections as never;
-          document.draft.packageSnapshots = seeded.packageSnapshots as never;
-        }
       }
     }
 
@@ -406,10 +377,6 @@ export class DocumentsService {
 
     if (dto.answers !== undefined) {
       document.draft.answers = this.parseAnswers(dto.answers);
-      // A PACKAGE_SELECT answer is a decision about what is being quoted, not a
-      // string to print — map.md §16, "when selected during document creation:
-      // populate defaults". Runs before totals are recomputed below.
-      await this.syncPackagesFromAnswers(organizationId, document);
     }
     if (dto.sections !== undefined) {
       document.draft.sections = this.parseSections(dto.sections) as never;
@@ -438,125 +405,6 @@ export class DocumentsService {
     return this.detail(organizationId, id);
   }
 
-  /**
-   * Applies every package a PACKAGE_SELECT answer names, and withdraws the ones
-   * the answers no longer name — map.md §16.
-   *
-   * Withdrawal is deliberately conservative. §16 also says a document may
-   * override what the package supplied ("Innova → Ertiga"), so a line the user
-   * has edited is kept when its package is deselected: only lines that still
-   * match the package are removed. A package edited upstream since it was
-   * applied therefore reads as "edited" and is also kept, which is the safe
-   * direction to be wrong in.
-   */
-  private async syncPackagesFromAnswers(
-    organizationId: string,
-    document: ProposalDocumentDocument,
-  ): Promise<void> {
-    if (!document.templateVersionId) return;
-
-    const version = await this.templates.requireVersion(organizationId, document.templateVersionId);
-    const fields = this.validator.parseFieldSchema(version.fieldSchemaJson);
-    const packageFields = fields.fields.filter((field) => field.type === 'PACKAGE_SELECT');
-    if (!packageFields.length) return;
-
-    const answers = document.draft.answers as Answers;
-    const tokens = packageFields
-      .flatMap((field) => {
-        const raw = answers?.[field.key];
-        return Array.isArray(raw) ? raw : [raw];
-      })
-      .map((value) => String(value ?? '').trim())
-      .filter((value) => value !== '');
-
-    const selected = await this.resolvePackageTokens(organizationId, tokens);
-    const selectedIds = new Set(selected.map((entry) => entry._id.toString()));
-    const snapshots = this.parsePackageSnapshots(document.draft.packageSnapshots);
-    const appliedIds = new Set(snapshots.map((snapshot) => snapshot.id));
-
-    const withdrawn = snapshots.filter((snapshot) => !selectedIds.has(snapshot.id));
-    const added = selected.filter((entry) => !appliedIds.has(entry._id.toString()));
-    if (!withdrawn.length && !added.length) return;
-
-    const settings = await this.organizations.getSettings(organizationId);
-    const defaultTaxRateId = settings.defaultTaxRateId?.toString() ?? null;
-    let sections = this.parseSections(document.draft.sections);
-
-    for (const snapshot of withdrawn) {
-      // eslint-disable-next-line no-await-in-loop
-      sections = await this.removeUnmodifiedPackageLines(
-        organizationId,
-        sections,
-        snapshot,
-        defaultTaxRateId,
-      );
-    }
-
-    const nextSnapshots = snapshots.filter(
-      (snapshot) => !withdrawn.includes(snapshot) || this.snapshotStillHasLines(snapshot, sections),
-    );
-
-    for (const entry of added) {
-      const lines = this.resolvePackageLines(entry, defaultTaxRateId);
-      sections = this.appendLines(sections, lines);
-      nextSnapshots.push(this.snapshotPackage(entry, lines.map((line) => line.id)) as never);
-    }
-
-    document.draft.sections = sections as never;
-    document.draft.packageSnapshots = this.reconcilePackageSnapshots(nextSnapshots, sections) as never;
-  }
-
-  /**
-   * A PACKAGE_SELECT option may hold a package id or its display name. Ids are
-   * what a picker should store; names are accepted because templates authored
-   * before packages were wired list human labels, and those must keep working.
-   */
-  private async resolvePackageTokens(
-    organizationId: string,
-    tokens: string[],
-  ): Promise<Array<Awaited<ReturnType<PackagesService['get']>>>> {
-    const resolved = new Map<string, Awaited<ReturnType<PackagesService['get']>>>();
-
-    for (const token of new Set(tokens)) {
-      if (Types.ObjectId.isValid(token)) {
-        // eslint-disable-next-line no-await-in-loop
-        const entry = await this.packages.get(organizationId, token).catch(() => null);
-        if (entry) {
-          resolved.set(entry._id.toString(), entry);
-          continue;
-        }
-      }
-
-      // eslint-disable-next-line no-await-in-loop
-      const page = await this.packages.list(organizationId, {
-        search: token,
-        limit: 25,
-        skip: 0,
-        page: 1,
-        includeArchived: false,
-      } as never);
-      const match = page.data.find(
-        (entry) => entry.name.trim().toLowerCase() === token.toLowerCase(),
-      );
-      // No match is not an error: the answer may legitimately be free text on a
-      // template whose options were never bound to real packages.
-      if (match) resolved.set(match._id.toString(), match);
-    }
-
-    return [...resolved.values()];
-  }
-
-  /**
-   * Replaces every 'reusableBlock' placeholder with the library block's own
-   * blocks — map.md §15, "templates can reference reusable blocks; during
-   * generation, RESOLVE them into a snapshot".
-   *
-   * A placeholder whose library entry is missing, archived or unreadable is
-   * dropped rather than failing generation: one stale reference must not make a
-   * quotation impossible to issue. The condition authored on the placeholder is
-   * inherited by each expanded block, so "show these terms only for interior
-   * jobs" keeps working after expansion.
-   */
   private async expandReusableBlocks(
     organizationId: string,
     blocks: TemplateBlock[],
@@ -597,184 +445,6 @@ export class DocumentsService {
     return expanded;
   }
 
-  /**
-   * Turns a template's default lines into document lines.
-   *
-   * Same contract as a package expansion: names, units and rates are copied by
-   * value, so editing the template later cannot move a quotation that already
-   * used it. Deliberately carries no packageId — these lines belong to the
-   * quotation, not to a bundle that can be removed or refreshed as a unit.
-   */
-  private resolveTemplateLines(
-    linesJson: unknown,
-    defaultTaxRateId: string | null,
-  ): DocumentSection['lines'] {
-    const parsed = this.validator.parseTemplateLines(linesJson);
-
-    return parsed.lines
-      .filter((line) => line.name.trim() !== '')
-      .map((line) => ({
-        id: nextLocalId('qln'),
-        kind: 'ITEM' as const,
-        itemId: line.itemId,
-        packageId: null,
-        packageName: '',
-        name: line.name,
-        description: line.description,
-        unit: line.unit,
-        pricingMode: 'QUANTITY_RATE' as const,
-        quantity: line.quantity,
-        days: 1,
-        rate: line.rate,
-        percent: 0,
-        formula: '',
-        manualAmount: 0,
-        taxRateId: line.taxRateId ?? defaultTaxRateId,
-        taxPercent: 0,
-        discount: { mode: 'PERCENT' as const, value: 0 },
-        optional: line.optional,
-        selected: true,
-      })) as DocumentSection['lines'];
-  }
-
-  /**
-   * New templates link packages instead of owning priced lines themselves.
-   *
-   * Existing templates may still carry `linesJson`, so that remains the fallback
-   * until they are edited onto the package-linked model.
-   */
-  private async resolveTemplateDefaults(
-    organizationId: string,
-    defaultPackages: Array<{
-      id: string;
-      sourcePackageId: string | null;
-      name: string;
-      description: string;
-      category: string;
-      pricingMode: 'SUM_OF_ITEMS' | 'FIXED_PRICE' | 'DISCOUNTED_TOTAL';
-      fixedPrice: number;
-      discountPercent: number;
-      lines: Array<{
-        lineId: string;
-        itemId: string | null;
-        name: string;
-        description: string;
-        unit: string;
-        quantity: number;
-        rate: number;
-        taxRateId: string | null;
-        optional: boolean;
-      }>;
-    }>,
-    defaultPackageIds: string[],
-    linesJson: unknown,
-    defaultTaxRateId: string | null,
-  ): Promise<{ lines: DocumentSection['lines']; packageSnapshots: Array<Record<string, unknown>> }> {
-    if (defaultPackages.length) {
-      return this.resolveTemplateSnapshotPackages(defaultPackages, defaultTaxRateId);
-    }
-
-    const packages = await this.resolveTemplateDefaultPackages(
-      organizationId,
-      defaultPackageIds,
-    );
-
-    if (!packages.length) {
-      return {
-        lines: this.resolveTemplateLines(linesJson, defaultTaxRateId),
-        packageSnapshots: [],
-      };
-    }
-
-    const lines: DocumentSection['lines'] = [];
-    const packageSnapshots: Array<Record<string, unknown>> = [];
-
-    for (const entry of packages) {
-      const resolved = this.resolvePackageLines(entry, defaultTaxRateId);
-      lines.push(...resolved);
-      packageSnapshots.push(this.snapshotPackage(entry, resolved.map((line) => line.id)));
-    }
-
-    return { lines, packageSnapshots };
-  }
-
-  private resolveTemplateSnapshotPackages(
-    entries: Array<{
-      id: string;
-      sourcePackageId: string | null;
-      name: string;
-      description: string;
-      category: string;
-      pricingMode: 'SUM_OF_ITEMS' | 'FIXED_PRICE' | 'DISCOUNTED_TOTAL';
-      fixedPrice: number;
-      discountPercent: number;
-      lines: Array<{
-        lineId: string;
-        itemId: string | null;
-        name: string;
-        description: string;
-        unit: string;
-        quantity: number;
-        rate: number;
-        taxRateId: string | null;
-        optional: boolean;
-      }>;
-    }>,
-    defaultTaxRateId: string | null,
-  ): { lines: DocumentSection['lines']; packageSnapshots: Array<Record<string, unknown>> } {
-    const lines: DocumentSection['lines'] = [];
-    const packageSnapshots: Array<Record<string, unknown>> = [];
-
-    for (const entry of entries) {
-      const resolved = this.packageResolver.resolve(
-        {
-          id: entry.id,
-          name: entry.name,
-          description: entry.description,
-          pricingMode: entry.pricingMode,
-          fixedPrice: entry.fixedPrice,
-          discountPercent: entry.discountPercent,
-          lines: entry.lines.map((line) => ({
-            itemId: line.itemId,
-            name: line.name,
-            description: line.description,
-            unit: line.unit,
-          quantity: line.quantity,
-          rate: line.rate,
-          taxRateId: line.taxRateId,
-          optional: line.optional,
-        })),
-        },
-        defaultTaxRateId,
-      );
-      lines.push(...resolved);
-      packageSnapshots.push(this.snapshotResolvedPackage(entry, resolved.map((line) => line.id)));
-    }
-
-    return { lines, packageSnapshots };
-  }
-
-  private async resolveTemplateDefaultPackages(
-    organizationId: string,
-    defaultPackageIds: string[],
-  ): Promise<Array<Awaited<ReturnType<PackagesService['get']>>>> {
-    const ordered = uniqueStrings(defaultPackageIds).filter((id) => Types.ObjectId.isValid(id));
-    const resolved: Array<Awaited<ReturnType<PackagesService['get']>>> = [];
-
-    for (const id of ordered) {
-      // eslint-disable-next-line no-await-in-loop
-      const entry = await this.packages.get(organizationId, id).catch(() => null);
-      if (entry && !entry.archivedAt) resolved.push(entry);
-    }
-
-    return resolved;
-  }
-
-  /**
-   * The one place a stored package becomes document lines. Both entry points —
-   * the item picker's addPackage and a PACKAGE_SELECT answer — go through here so
-   * they cannot drift into pricing the same package differently.
-   */
   private resolvePackageLines(
     entry: Awaited<ReturnType<PackagesService['get']>>,
     defaultTaxRateId: string | null,
@@ -800,51 +470,6 @@ export class DocumentsService {
       },
       defaultTaxRateId,
     );
-  }
-
-  /** Drops the deselected package's lines that a user has not edited. */
-  private async removeUnmodifiedPackageLines(
-    organizationId: string,
-    sections: DocumentSection[],
-    snapshot: { id: string; lineIds: string[] },
-    defaultTaxRateId: string | null,
-  ): Promise<DocumentSection[]> {
-    const entry = await this.packages.get(organizationId, snapshot.id).catch(() => null);
-    // The package itself is gone; its lines are all the document has left of it.
-    if (!entry) return sections;
-
-    const pristine = this.resolvePackageLines(entry, defaultTaxRateId);
-    const owned = new Set(snapshot.lineIds);
-
-    return sections.map((section) => ({
-      ...section,
-      lines: section.lines.filter((line) => {
-        if (!owned.has(line.id)) return true;
-        const original = pristine.find((candidate) => candidate.name === line.name);
-        return original ? !this.matchesPackageLine(line, original) : true;
-      }),
-    }));
-  }
-
-  /** Whether a document line still carries exactly what the package supplied. */
-  private matchesPackageLine(line: DocumentSection['lines'][number], original: DocumentSection['lines'][number]) {
-    return (
-      line.unit === original.unit &&
-      line.quantity === original.quantity &&
-      line.rate === original.rate &&
-      line.optional === original.optional &&
-      line.discount.mode === original.discount.mode &&
-      line.discount.value === original.discount.value &&
-      (line.taxRateId ?? null) === (original.taxRateId ?? null)
-    );
-  }
-
-  private snapshotStillHasLines(
-    snapshot: { lineIds: string[] },
-    sections: DocumentSection[],
-  ): boolean {
-    const remaining = new Set(sections.flatMap((section) => section.lines).map((line) => line.id));
-    return snapshot.lineIds.some((lineId) => remaining.has(lineId));
   }
 
   private appendLines(
@@ -1567,8 +1192,4 @@ function unique(values: Array<string | null | undefined>): Types.ObjectId[] {
   return [...seen]
     .filter((value) => Types.ObjectId.isValid(value))
     .map((value) => new Types.ObjectId(value));
-}
-
-function uniqueStrings(values: string[]): string[] {
-  return [...new Set(values.filter((value) => value.trim() !== ''))];
 }

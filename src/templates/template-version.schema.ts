@@ -32,15 +32,6 @@ export class TemplateVersion {
   settingsJson!: Record<string, unknown>;
 
   /**
-   * Line items a quotation starts with when it uses this template.
-   *
-   * Frozen with the version like everything else here, so republishing with
-   * different lines cannot change a quotation that already used the old ones.
-   */
-  @Prop({ type: Object, default: {} })
-  linesJson!: Record<string, unknown>;
-
-  /**
    * The body as authored in the document editor, sanitised.
    *
    * When set it replaces `schemaJson.blocks` as the document's content: a

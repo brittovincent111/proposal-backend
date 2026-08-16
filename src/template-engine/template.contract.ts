@@ -45,18 +45,14 @@ export const FieldTypes = [
   'PHONE',
   'URL',
   'PERCENTAGE',
-  'PACKAGE_SELECT',
+  // PACKAGE_SELECT and ITEM_LIST lived here until the proposal/quotation split.
+  // Answering a question could add priced lines to the document, which is the
+  // one thing the wall forbids; a proposal has no lines for them to write to.
   'BLOCK_SELECT',
-  'ITEM_LIST',
 ] as const;
 export type FieldType = (typeof FieldTypes)[number];
 
-export const OPTION_FIELD_TYPES: FieldType[] = [
-  'SELECT',
-  'MULTI_SELECT',
-  'PACKAGE_SELECT',
-  'BLOCK_SELECT',
-];
+export const OPTION_FIELD_TYPES: FieldType[] = ['SELECT', 'MULTI_SELECT', 'BLOCK_SELECT'];
 export const NUMERIC_FIELD_TYPES: FieldType[] = ['NUMBER', 'CURRENCY', 'PERCENTAGE'];
 
 export const fieldSchema = z.object({
@@ -211,58 +207,12 @@ export const extraChargeSchema = z.object({
   amount: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER),
 });
 
-/**
- * Line items a template starts a quotation with — map.md §16 applied to templates
- * rather than packages.
- *
- * These make Packages optional: a business with one layout and one standard set
- * of lines never has to open the packages module. Copied by value into the draft
- * at creation, exactly as a package is, so editing the template afterwards cannot
- * alter a quotation that already used it.
- */
-export const templateLineSchema = z.object({
-  lineId: z.string().min(1).max(64),
-  itemId: z.string().max(64).nullable().default(null),
-  syncToCatalog: z.boolean().default(false),
-  name: z.string().max(300),
-  description: z.string().max(2000).default(''),
-  unit: z.string().max(40).default('nos'),
-  quantity: z.number().min(0).max(1_000_000).default(1),
-  /** Minor units, matching every other rate in the system. */
-  rate: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).default(0),
-  taxRateId: z.string().max(64).nullable().default(null),
-  optional: z.boolean().default(false),
-});
-export type TemplateLine = z.infer<typeof templateLineSchema>;
-
-export const templateLinesJson = z.object({
-  schemaVersion: z.number().int().positive().default(SCHEMA_VERSION),
-  lines: z.array(templateLineSchema).max(200).default([]),
-});
-export type TemplateLinesJson = z.infer<typeof templateLinesJson>;
-
-export const templateDefaultPackageSchema = z.object({
-  id: z.string().min(1).max(64),
-  sourcePackageId: z.string().max(64).nullable().default(null),
-  syncToCatalog: z.boolean().default(false),
-  name: z.string().max(300),
-  description: z.string().max(5000).default(''),
-  category: z.string().max(120).default('General'),
-  pricingMode: z.enum(['SUM_OF_ITEMS', 'FIXED_PRICE', 'DISCOUNTED_TOTAL']).default('SUM_OF_ITEMS'),
-  fixedPrice: z.number().int().min(0).max(Number.MAX_SAFE_INTEGER).default(0),
-  discountPercent: z.number().min(0).max(100).default(0),
-  lines: z.array(templateLineSchema).max(200).default([]),
-});
-export type TemplateDefaultPackage = z.infer<typeof templateDefaultPackageSchema>;
-
 export const templateSettingsJson = z.object({
   defaultValidityDays: z.number().int().min(1).max(365).nullable().default(null),
   defaultTaxInclusive: z.boolean().nullable().default(null),
   defaultRoundOff: z.boolean().nullable().default(null),
   defaultTerms: z.string().max(20_000).default(''),
   defaultPaymentTerms: z.string().max(20_000).default(''),
-  defaultPackageIds: z.array(z.string().max(64)).max(20).default([]),
-  defaultPackages: z.array(templateDefaultPackageSchema).max(20).default([]),
 });
 export type TemplateSettingsJson = z.infer<typeof templateSettingsJson>;
 

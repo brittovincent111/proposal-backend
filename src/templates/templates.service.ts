@@ -192,7 +192,6 @@ export class TemplatesService {
         schemaJson: this.validator.parseDocumentSchema(dto.draft?.schemaJson),
         fieldSchemaJson: this.validator.parseFieldSchema(dto.draft?.fieldSchemaJson),
         styleSchemaJson: this.validator.parseStyleSchema(dto.draft?.styleSchemaJson),
-        linesJson: this.validator.parseTemplateLines(dto.draft?.linesJson),
         settingsJson: this.validator.parseSettings(dto.draft?.settingsJson),
         documentHtml: sanitiseDocumentBody(dto.draft?.documentHtml ?? ''),
       },
@@ -249,11 +248,8 @@ export class TemplatesService {
       fieldSchemaJson: source?.fieldSchemaJson ?? this.validator.parseFieldSchema(undefined),
       styleSchemaJson: source?.styleSchemaJson ?? this.validator.parseStyleSchema(undefined),
       settingsJson: source?.settingsJson ?? this.validator.parseSettings(undefined),
-      // Carried over like everything else: omitting it meant a publish followed by
-      // an edit silently discarded the template's default line items.
-      linesJson: source?.linesJson ?? this.validator.parseTemplateLines(undefined),
-      // Carried over for the same reason as linesJson: dropping it here would
-      // silently blank a document-authored template on its first edit after publish.
+      // Carried over because dropping it here would silently blank a
+      // document-authored template on its first edit after publish.
       documentHtml: source?.documentHtml ?? '',
       createdById: template.createdById,
     });
@@ -290,9 +286,6 @@ export class TemplatesService {
     }
     if (patch.fieldSchemaJson !== undefined) {
       draft.fieldSchemaJson = this.validator.parseFieldSchema(patch.fieldSchemaJson);
-    }
-    if (patch.linesJson !== undefined) {
-      draft.linesJson = this.validator.parseTemplateLines(patch.linesJson);
     }
     if (patch.styleSchemaJson !== undefined) {
       draft.styleSchemaJson = this.validator.parseStyleSchema(patch.styleSchemaJson);
@@ -429,7 +422,6 @@ export class TemplatesService {
         schemaJson: source.schemaJson,
         fieldSchemaJson: source.fieldSchemaJson,
         styleSchemaJson: source.styleSchemaJson,
-        linesJson: source.linesJson,
         settingsJson: source.settingsJson,
         documentHtml: source.documentHtml ?? '',
       },
@@ -479,7 +471,6 @@ export class TemplatesService {
       schemaJson: Record<string, unknown>;
       fieldSchemaJson: Record<string, unknown>;
       styleSchemaJson: Record<string, unknown>;
-      linesJson: Record<string, unknown>;
       settingsJson: Record<string, unknown>;
       documentHtml: string;
     },
@@ -525,7 +516,6 @@ export class TemplatesService {
     draft.schemaJson = payload.schemaJson;
     draft.fieldSchemaJson = payload.fieldSchemaJson;
     draft.styleSchemaJson = payload.styleSchemaJson;
-    draft.linesJson = payload.linesJson;
     draft.settingsJson = payload.settingsJson;
     draft.documentHtml = payload.documentHtml;
     await draft.save();

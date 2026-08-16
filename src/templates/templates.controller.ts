@@ -20,7 +20,6 @@ import {
   UpdateDraftFieldsDto,
   UpdateDraftSchemaDto,
   UpdateDraftDocumentDto,
-  UpdateDraftLinesDto,
   UpdateDraftSettingsDto,
   UpdateDraftStyleDto,
   UpdateTemplateDto,
@@ -111,23 +110,6 @@ export class TemplatesController {
   ) {
     return this.templates.updateDraft(tenant.organizationId, id, {
       settingsJson: body.settingsJson,
-    });
-  }
-
-  @Patch(':id/draft/lines')
-  @RequirePermissions('template.edit')
-  @ApiOperation({
-    summary: 'Default line items a quotation starts with.',
-    description:
-      'Copied by value into the draft when a quotation is created, so editing them later never changes a quotation that already used them.',
-  })
-  updateDraftLines(
-    @CurrentTenant() tenant: TenantContext,
-    @Param('id') id: string,
-    @Body() body: UpdateDraftLinesDto,
-  ) {
-    return this.templates.updateDraft(tenant.organizationId, id, {
-      linesJson: body.linesJson,
     });
   }
 

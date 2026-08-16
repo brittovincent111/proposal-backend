@@ -11,13 +11,11 @@ import {
   FieldSchemaJson,
   OPTION_FIELD_TYPES,
   StyleSchemaJson,
-  TemplateLinesJson,
   TemplateSettingsJson,
   blockVariables,
   documentSchemaJson,
   fieldSchemaJson,
   styleSchemaJson,
-  templateLinesJson,
   templateSettingsJson,
 } from './template.contract';
 
@@ -61,10 +59,6 @@ export class TemplateSchemaValidator {
 
   parseFieldSchema(input: unknown): FieldSchemaJson {
     return this.parse(fieldSchemaJson, input, ErrorCodes.FIELD_SCHEMA_INVALID, 'field schema');
-  }
-
-  parseTemplateLines(input: unknown): TemplateLinesJson {
-    return this.parse(templateLinesJson, input, ErrorCodes.TEMPLATE_SCHEMA_INVALID, 'template lines');
   }
 
   parseStyleSchema(input: unknown): StyleSchemaJson {
@@ -182,6 +176,14 @@ export class TemplateSchemaValidator {
       blockVariables(block)
         .filter((variable) => !known.has(variable))
         .forEach((variable) => {
+          if (FORBIDDEN_MONEY_VARIABLES.includes(variable)) {
+            errors.push({
+              path: `blocks[${index}].content`,
+              code: ErrorCodes.UNKNOWN_VARIABLE_REFERENCE,
+              message: `Block "${block.label || block.type}" uses {{${variable}}}. A template produces a proposal, which never prints a calculated total — create a quotation for the pricing instead.`,
+            });
+            return;
+          }
           warnings.push({
             path: `blocks[${index}].content`,
             code: ErrorCodes.UNKNOWN_VARIABLE_REFERENCE,
@@ -341,6 +343,17 @@ export const RESERVED_VARIABLES = [
   'document_number',
   'document_date',
   'valid_until',
+];
+
+/**
+ * Money variables a template may no longer print — the hard wall, at publish time.
+ *
+ * These used to be reserved. A template now only ever produces a proposal, which
+ * carries no computed number, so naming one is an error rather than a warning: a
+ * warning is non-blocking and an author would publish straight past it, and the
+ * customer would receive a document with a silently blank total in it.
+ */
+export const FORBIDDEN_MONEY_VARIABLES = [
   'subtotal',
   'discount_total',
   'tax_total',
