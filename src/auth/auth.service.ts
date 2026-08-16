@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import { Model, Types } from 'mongoose';
+import { OAuth2Client } from 'google-auth-library';
 
 import { BusinessCategoriesService } from 'src/business-categories/business-categories.service';
 import { DomainException } from 'src/common/errors/domain.exception';
@@ -273,6 +274,110 @@ export class AuthService {
           },
         ];
       }),
+    };
+  }
+
+  /** Verify Google ID token and check if user exists */
+  async verifyGoogleToken(token: string): Promise<{
+    isNewUser: boolean;
+    profile?: {
+      email: string;
+      firstName?: string;
+      lastName?: string;
+    };
+  }> {
+    const client = new OAuth2Client();
+
+    try {
+      const ticket = await client.verifyIdToken({
+        idToken: token,
+        audience: process.env.GOOGLE_CLIENT_ID,
+      });
+
+      const payload = ticket.getPayload();
+      if (!payload) {
+        throw new Error('No payload in Google token');
+      }
+
+      const email = payload.email;
+      if (!email) {
+        throw new Error('No email in Google token');
+      }
+
+      const existingUser = await this.users.findByEmail(email);
+
+      return {
+        isNewUser: !existingUser,
+        profile: {
+          email,
+          firstName: payload.given_name,
+          lastName: payload.family_name,
+        },
+      };
+    } catch (error) {
+      throw DomainException.unauthorized(
+        'Invalid Google token.',
+        ErrorCodes.INVALID_CREDENTIALS,
+      );
+    }
+  }
+
+  /** Register or login user via Google OAuth */
+  async registerWithGoogle(
+    input: {
+      token: string;
+      organizationName: string;
+      primaryBusinessCategoryId?: string;
+      firstName?: string;
+      lastName?: string;
+    },
+    context: SessionContext,
+  ): Promise<SignInResult> {
+    const client = new OAuth2Client();
+
+    let payload;
+    try {
+      const ticket = await client.verifyIdToken({
+        idToken: input.token,
+        audience: process.env.GOOGLE_CLIENT_ID,
+      });
+
+      payload = ticket.getPayload();
+      if (!payload || !payload.email) {
+        throw new Error('Invalid Google token');
+      }
+    } catch (error) {
+      throw DomainException.unauthorized(
+        'Invalid Google token.',
+        ErrorCodes.INVALID_CREDENTIALS,
+      );
+    }
+
+    const email = payload.email!;
+    let user = await this.users.findByEmail(email);
+
+    // New user registration via Google
+    if (!user) {
+      user = await this.users.create({
+        email,
+        firstName: input.firstName || payload.given_name,
+        lastName: input.lastName || payload.family_name,
+      });
+
+      const organization = await this.organizations.provision({
+        name: input.organizationName,
+        ownerUserId: user._id,
+        ownerEmail: user.email,
+        primaryBusinessCategoryId: input.primaryBusinessCategoryId,
+      });
+
+      await this.provisionStarterTemplate(organization, user._id);
+    }
+
+    await this.users.touchLogin(user._id);
+    return {
+      tokens: await this.tokens.issue({ id: user._id, email: user.email }, context),
+      userId: user._id.toString(),
     };
   }
 }

@@ -22,6 +22,7 @@ import { OrganizationsModule } from './organizations/organizations.module';
 import { PackagesModule } from './packages/packages.module';
 import { PlatformAdminModule } from './platform-admin/platform-admin.module';
 import { PublicProposalsModule } from './public-proposals/public-proposals.module';
+import { LeadsModule } from './leads/leads.module';
 import { RenderingModule } from './rendering/rendering.module';
 import { ReusableBlocksModule } from './reusable-blocks/reusable-blocks.module';
 import { TemplateEngineModule } from './template-engine/template-engine.module';
@@ -42,6 +43,7 @@ import { UsersModule } from './users/users.module';
     CustomersModule,
     CatalogModule,
     PackagesModule,
+    LeadsModule,
     ReusableBlocksModule,
     TemplateEngineModule,
     TemplatesModule,

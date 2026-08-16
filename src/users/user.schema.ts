@@ -32,7 +32,7 @@ export class User {
   lastLoginAt!: Date | null;
 
   /**
-   * Staff of the QTN platform itself, not of any tenant — this is what unlocks
+   * Staff of the QuoteProposal platform itself, not of any tenant — this is what unlocks
    * /admin. Deliberately a flag on the user rather than a role inside an
    * organization: platform admins act across every tenant, so a membership-based
    * role could never express it.

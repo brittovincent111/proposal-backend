@@ -13,6 +13,8 @@ import { AuthService, SessionContext } from './auth.service';
 import {
   AcceptInviteDto,
   ForgotPasswordDto,
+  GoogleRegisterDto,
+  GoogleVerifyDto,
   LoginDto,
   RegisterDto,
   ResetPasswordDto,
@@ -100,6 +102,29 @@ export class AuthController {
     const result = await this.auth.refresh(presented, this.contextOf(request));
     setAuthCookies(response, this.config, result.tokens);
     return this.auth.profile(result.userId.toString());
+  }
+
+  @Post('google/verify')
+  @Public()
+  @HttpCode(200)
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @ApiOperation({ summary: 'Verify Google ID token and check if user exists.' })
+  async verifyGoogle(@Body() body: GoogleVerifyDto) {
+    return this.auth.verifyGoogleToken(body.token);
+  }
+
+  @Post('google/register')
+  @Public()
+  @Throttle({ default: { limit: 10, ttl: 60_000 } })
+  @ApiOperation({ summary: 'Register new user or login existing user via Google OAuth.' })
+  async registerGoogle(
+    @Body() body: GoogleRegisterDto,
+    @Req() request: Request,
+    @Res({ passthrough: true }) response: Response,
+  ) {
+    const { tokens, userId } = await this.auth.registerWithGoogle(body, this.contextOf(request));
+    setAuthCookies(response, this.config, tokens);
+    return this.auth.profile(userId);
   }
 
   @Post('logout')

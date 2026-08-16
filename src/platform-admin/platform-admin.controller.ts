@@ -16,7 +16,12 @@ import { InvoicesService } from 'src/billing/invoices.service';
 import { PlansService } from 'src/billing/plans.service';
 import { SubscriptionsService } from 'src/billing/subscriptions.service';
 import { SkipTenant } from 'src/common/decorators';
-import { ListTenantsQueryDto, SetTenantStatusDto } from './dto/platform-admin.dto';
+import { LeadsService } from 'src/leads/leads.service';
+import {
+  ListLeadsQueryDto,
+  ListTenantsQueryDto,
+  SetTenantStatusDto,
+} from './dto/platform-admin.dto';
 import { PlatformAdminGuard } from './platform-admin.guard';
 import { PlatformAdminService } from './platform-admin.service';
 
@@ -38,6 +43,7 @@ export class PlatformAdminController {
     private readonly subscriptions: SubscriptionsService,
     private readonly invoices: InvoicesService,
     private readonly discounts: DiscountsService,
+    private readonly leads: LeadsService,
   ) {}
 
   @Get('session')
@@ -52,6 +58,12 @@ export class PlatformAdminController {
   @ApiOperation({ summary: 'MRR, tenant counts, plan mix and the signup curve.' })
   metrics() {
     return this.admin.metrics();
+  }
+
+  @Get('leads')
+  @ApiOperation({ summary: 'Marketing leads captured from the public website.' })
+  leadsIndex(@Query() query: ListLeadsQueryDto) {
+    return this.leads.list(query);
   }
 
   // ------------------------------------------------------------------ tenants

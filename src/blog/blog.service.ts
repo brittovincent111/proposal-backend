@@ -1,13 +1,15 @@
-import { Injectable } from '@nestjs/common';
+import { HttpStatus, Injectable } from '@nestjs/common';
 import { InjectModel } from '@nestjs/mongoose';
 import sanitizeHtml from 'sanitize-html';
 import { Model, Types, isValidObjectId } from 'mongoose';
+import { z } from 'zod';
 
 import { DomainException } from 'src/common/errors/domain.exception';
 import { ErrorCodes } from 'src/common/errors/error-codes';
 import type { AuthenticatedUser } from 'src/common/context/request-context';
+import { BLOG_DRAFTING_RULES } from './blog-drafting-rules';
 import { BlogPost, BlogPostDocument, BlogPostStatus } from './blog-post.schema';
-import { CreateBlogPostDto, UpdateBlogPostDto } from './dto/blog.dto';
+import { CreateBlogPostDto, GenerateBlogDraftDto, UpdateBlogPostDto } from './dto/blog.dto';
 
 const BLOG_SANITIZE: sanitizeHtml.IOptions = {
   allowedTags: [
@@ -47,7 +49,22 @@ const BLOG_SANITIZE: sanitizeHtml.IOptions = {
   disallowedTagsMode: 'discard',
 };
 
-const DEFAULT_AUTHOR = 'QTN Team';
+const DEFAULT_AUTHOR = 'QuoteProposal Team';
+const DEFAULT_OPENAI_BLOG_MODEL = 'gpt-4.1-mini';
+
+const GeneratedBlogDraftSchema = z.object({
+  title: z.string().min(8),
+  slug: z.string().optional().default(''),
+  excerpt: z.string().optional().default(''),
+  contentHtml: z.string().min(120),
+  tags: z.array(z.string()).optional().default([]),
+  coverImageUrl: z.string().nullable().optional(),
+  authorName: z.string().nullable().optional(),
+  seoTitle: z.string().nullable().optional(),
+  seoDescription: z.string().nullable().optional(),
+  canonicalUrl: z.string().nullable().optional(),
+  ogImageUrl: z.string().nullable().optional(),
+});
 
 @Injectable()
 export class BlogService {
@@ -126,6 +143,30 @@ export class BlogService {
     });
 
     return this.present(created.toObject());
+  }
+
+  async generateDraft(body: GenerateBlogDraftDto, user?: AuthenticatedUser) {
+    const aiDraft = await this.generateAiDraft(body);
+    const slug = await this.nextAvailableSlug(aiDraft.slug || aiDraft.title || body.topic);
+
+    return this.create(
+      {
+        title: limitText(aiDraft.title, 180) ?? body.topic.trim().slice(0, 180),
+        slug,
+        excerpt: limitText(aiDraft.excerpt, 320) ?? undefined,
+        contentHtml: aiDraft.contentHtml,
+        tags: normalizeTags([...(aiDraft.tags ?? []), ...(body.keywords ?? [])]).slice(0, 10),
+        coverImageUrl: normalizeHttpUrl(aiDraft.coverImageUrl),
+        authorName: limitText(aiDraft.authorName, 120),
+        seoTitle: limitText(aiDraft.seoTitle, 180),
+        seoDescription: limitText(aiDraft.seoDescription, 320),
+        canonicalUrl: normalizeHttpUrl(aiDraft.canonicalUrl),
+        ogImageUrl: normalizeHttpUrl(aiDraft.ogImageUrl),
+        status: 'DRAFT',
+        publishedAt: null,
+      },
+      user,
+    );
   }
 
   async update(id: string, body: UpdateBlogPostDto, user?: AuthenticatedUser) {
@@ -210,6 +251,107 @@ export class BlogService {
     }
   }
 
+  private async nextAvailableSlug(seed: string) {
+    const fallback = `blog-${new Date().toISOString().slice(0, 10)}`;
+    const base = normalizeSlug(seed) || fallback;
+
+    let slug = base;
+    let attempt = 2;
+    while (await this.posts.findOne({ slug }).select({ _id: 1 }).lean()) {
+      const suffix = `-${attempt}`;
+      slug = `${base.slice(0, Math.max(1, 180 - suffix.length)).replace(/-+$/g, '')}${suffix}`;
+      attempt += 1;
+    }
+
+    return slug;
+  }
+
+  private async generateAiDraft(input: GenerateBlogDraftDto) {
+    const apiKey = process.env.OPENAI_API_KEY?.trim();
+    if (!apiKey) {
+      throw DomainException.invalid(
+        ErrorCodes.BLOG_DRAFTING_NOT_CONFIGURED,
+        'Set OPENAI_API_KEY on the API before generating blog drafts.',
+      );
+    }
+
+    const model = process.env.OPENAI_BLOG_MODEL?.trim() || DEFAULT_OPENAI_BLOG_MODEL;
+
+    let response: Response;
+    try {
+      response = await fetch('https://api.openai.com/v1/chat/completions', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${apiKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          model,
+          temperature: 0.7,
+          messages: [
+            {
+              role: 'system',
+              content: [
+                'You are an expert SaaS content strategist and blog editor.',
+                'Follow the house rules exactly and return raw JSON only.',
+                BLOG_DRAFTING_RULES,
+              ].join('\n\n'),
+            },
+            {
+              role: 'user',
+              content: buildDraftPrompt(input),
+            },
+          ],
+        }),
+      });
+    } catch {
+      throw new DomainException(
+        ErrorCodes.BLOG_DRAFT_GENERATION_FAILED,
+        'The AI draft request could not reach OpenAI.',
+        HttpStatus.BAD_GATEWAY,
+      );
+    }
+
+    const payload = (await response.json().catch(() => null)) as Record<string, any> | null;
+    if (!response.ok) {
+      throw new DomainException(
+        ErrorCodes.BLOG_DRAFT_GENERATION_FAILED,
+        readOpenAiErrorMessage(payload),
+        HttpStatus.BAD_GATEWAY,
+      );
+    }
+
+    const content = readChatCompletionContent(payload);
+    if (!content) {
+      throw new DomainException(
+        ErrorCodes.BLOG_DRAFT_INVALID,
+        'OpenAI returned an empty draft.',
+        HttpStatus.BAD_GATEWAY,
+      );
+    }
+
+    const parsedJson = tryParseJsonObject(content);
+    if (!parsedJson) {
+      throw new DomainException(
+        ErrorCodes.BLOG_DRAFT_INVALID,
+        'OpenAI returned a draft in an unexpected format.',
+        HttpStatus.BAD_GATEWAY,
+      );
+    }
+
+    const result = GeneratedBlogDraftSchema.safeParse(parsedJson);
+    if (!result.success) {
+      throw new DomainException(
+        ErrorCodes.BLOG_DRAFT_INVALID,
+        'OpenAI returned a draft missing required fields.',
+        HttpStatus.BAD_GATEWAY,
+        result.error.issues,
+      );
+    }
+
+    return result.data;
+  }
+
   private present(row: Record<string, any>) {
     return {
       id: row._id?.toString?.() ?? row.id,
@@ -265,6 +407,16 @@ function normalizeNullable(input: string | null | undefined): string | null {
   return trimmed ? trimmed : null;
 }
 
+function normalizeHttpUrl(input: string | null | undefined): string | null {
+  const value = normalizeNullable(input);
+  return value && /^https?:\/\//i.test(value) ? value : null;
+}
+
+function limitText(input: string | null | undefined, maxLength: number): string | null {
+  const value = normalizeNullable(input);
+  return value ? value.slice(0, maxLength).trim() : null;
+}
+
 function plainText(input: string): string {
   return sanitizeHtml(input ?? '', { allowedTags: [], allowedAttributes: {} }).trim();
 }
@@ -287,6 +439,80 @@ function resolvePublishedAt(status: BlogPostStatus, input: string | null | undef
   if (status !== 'PUBLISHED') return null;
   if (input) return new Date(input);
   return new Date();
+}
+
+function buildDraftPrompt(input: GenerateBlogDraftDto): string {
+  const sections = [
+    `Topic: ${input.topic.trim()}`,
+    input.angle ? `Angle: ${input.angle.trim()}` : null,
+    input.keywords?.length ? `Keywords: ${normalizeTags(input.keywords).join(', ')}` : null,
+    input.notes ? `Notes: ${input.notes.trim()}` : null,
+    [
+      'Output requirements:',
+      '- Save-ready article draft for the QuoteProposal blog.',
+      '- Keep status out of the payload; the application will save it as DRAFT.',
+      '- Return JSON only.',
+    ].join('\n'),
+  ];
+
+  return sections.filter(Boolean).join('\n\n');
+}
+
+function readChatCompletionContent(payload: Record<string, any> | null): string | null {
+  const firstChoice = payload?.choices?.[0];
+  const content = firstChoice?.message?.content;
+
+  if (typeof content === 'string') return stripCodeFence(content);
+
+  if (Array.isArray(content)) {
+    const text = content
+      .map((entry) => (entry && typeof entry.text === 'string' ? entry.text : ''))
+      .join('')
+      .trim();
+    return text ? stripCodeFence(text) : null;
+  }
+
+  return null;
+}
+
+function stripCodeFence(input: string): string {
+  return input.trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/i, '');
+}
+
+function tryParseJsonObject(input: string): Record<string, unknown> | null {
+  const candidate = stripCodeFence(input);
+  const parsed = tryParseJson(candidate);
+  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    return parsed as Record<string, unknown>;
+  }
+
+  const firstBrace = candidate.indexOf('{');
+  const lastBrace = candidate.lastIndexOf('}');
+  if (firstBrace === -1 || lastBrace === -1 || firstBrace >= lastBrace) return null;
+
+  const fallback = tryParseJson(candidate.slice(firstBrace, lastBrace + 1));
+  if (fallback && typeof fallback === 'object' && !Array.isArray(fallback)) {
+    return fallback as Record<string, unknown>;
+  }
+
+  return null;
+}
+
+function tryParseJson(input: string): unknown {
+  try {
+    return JSON.parse(input);
+  } catch {
+    return null;
+  }
+}
+
+function readOpenAiErrorMessage(payload: Record<string, any> | null): string {
+  const message = payload?.error?.message;
+  if (typeof message === 'string' && message.trim()) {
+    return `OpenAI draft generation failed: ${message.trim()}`;
+  }
+
+  return 'OpenAI draft generation failed.';
 }
 
 function toObjectId(value: string | undefined): Types.ObjectId | null {

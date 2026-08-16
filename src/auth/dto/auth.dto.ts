@@ -94,3 +94,39 @@ export class AcceptInviteDto {
   @MaxLength(80)
   lastName?: string;
 }
+
+export class GoogleVerifyDto {
+  @ApiProperty({ description: 'Google ID token from client' })
+  @IsString()
+  token!: string;
+}
+
+export class GoogleRegisterDto {
+  @ApiProperty({ description: 'Google ID token from client' })
+  @IsString()
+  token!: string;
+
+  @ApiProperty({ example: 'ABC Travels', description: 'Organization name for new users.' })
+  @IsString()
+  @MinLength(2)
+  @MaxLength(120)
+  organizationName!: string;
+
+  @ApiPropertyOptional({ description: 'Primary business category for the new organization.' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(24)
+  primaryBusinessCategoryId?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  firstName?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(80)
+  lastName?: string;
+}
