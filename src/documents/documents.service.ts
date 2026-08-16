@@ -95,6 +95,7 @@ export class DocumentsService {
       organizationId: new Types.ObjectId(organizationId),
     };
     if (!query.includeArchived) filter.archivedAt = null;
+    if (query.kind) filter.kind = query.kind;
     if (query.status) filter.status = query.status;
     if (query.customerId) filter.customerId = new Types.ObjectId(query.customerId);
     if (query.templateId) filter.templateId = new Types.ObjectId(query.templateId);
@@ -115,7 +116,7 @@ export class DocumentsService {
         // draftTotals in full: its `lines` map gives the list a priced-line count
         // without shipping the draft itself, which is what the list must never do.
         .select(
-          'documentNumber title reference status currency locale ' +
+          'kind documentNumber title reference status currency locale ' +
             'customerSnapshot.name customerSnapshot.companyName customerSnapshot.customerId ' +
             'templateId templateName currentRevisionNumber validFrom validUntil draftTotals ' +
             'createdAt updatedAt',
@@ -247,6 +248,7 @@ export class DocumentsService {
 
     const document = await this.documents.create({
       organizationId: organization._id,
+      kind: dto.kind,
       documentNumber: number,
       title: dto.title ?? templateName,
       reference: dto.reference ?? '',

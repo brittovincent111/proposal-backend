@@ -135,6 +135,7 @@ async function seed(): Promise<void> {
     logger.log(`Published template ${SEED_TEMPLATE.name}`);
 
     const document = await documents.create(organizationId, userId, {
+      kind: 'PROPOSAL',
       templateId,
       customerId: customer._id.toString(),
       title: 'Kerala trip — Ravi Menon',

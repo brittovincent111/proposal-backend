@@ -15,10 +15,20 @@ import {
 } from 'class-validator';
 
 import { PaginationQuery } from 'src/common/dto/pagination.dto';
-import { DocumentStatuses } from '../schemas/document.schema';
+import { DocumentKind, DocumentKinds, DocumentStatuses } from '../schemas/document.schema';
 
 export class CreateDocumentDto {
-  @ApiPropertyOptional({ description: 'Pins the template\'s active published version.' })
+  @ApiProperty({
+    enum: DocumentKinds,
+    description:
+      'PROPOSAL (template + answers, never priced) or QUOTATION (priced lines, no template).',
+  })
+  @IsIn(DocumentKinds)
+  kind!: DocumentKind;
+
+  @ApiPropertyOptional({
+    description: "PROPOSAL only. Pins the template's active published version.",
+  })
   @IsOptional()
   @IsMongoId()
   templateId?: string;
@@ -37,7 +47,10 @@ export class CreateDocumentDto {
   @MaxLength(40)
   validUntil?: string;
 
-  @ApiPropertyOptional({ type: Object, description: 'Initial answers to the template questions.' })
+  @ApiPropertyOptional({
+    type: Object,
+    description: 'PROPOSAL only. Initial answers to the template questions.',
+  })
   @IsOptional()
   @IsObject()
   answers?: Record<string, unknown>;
@@ -135,6 +148,11 @@ export class SendDocumentDto {
 }
 
 export class DocumentQuery extends PaginationQuery {
+  @ApiPropertyOptional({ enum: DocumentKinds, description: 'Omit to list both kinds.' })
+  @IsOptional()
+  @IsIn(DocumentKinds)
+  kind?: DocumentKind;
+
   @ApiPropertyOptional({ enum: DocumentStatuses })
   @IsOptional()
   @IsIn(DocumentStatuses)
