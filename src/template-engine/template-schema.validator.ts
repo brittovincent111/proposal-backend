@@ -99,16 +99,21 @@ export class TemplateSchemaValidator {
       }
 
       /*
-       * A question that asks for a price duplicates the pricing table, which
-       * already handles quantity, rate, tax, discounts and totals — and does the
-       * arithmetic. Templates that ask for "Base Price" or "Discount" as text put
-       * the operator in front of two pricing systems, one of which does not add up.
+       * A question that asks for a price is a hand-rolled pricing system.
+       *
+       * A template produces a proposal, which does no arithmetic — so a "Base
+       * Price" or "Discount" answer prints whatever the operator typed and never
+       * adds up with anything. A quotation is where prices belong; it computes
+       * quantity, rate, tax, discounts and totals from real line items.
+       *
+       * Still a warning, not an error: the numbers are the operator's own and
+       * printing them is a legitimate, if unwise, thing to want.
        */
       if (PRICING_QUESTION_KEYS.has(field.key)) {
         warnings.push({
           path: `fields[${index}].key`,
           code: ErrorCodes.FIELD_SCHEMA_INVALID,
-          message: `"${field.label}" asks for pricing the item table already handles. Consider removing it and adding a Pricing Table block instead.`,
+          message: `"${field.label}" asks the operator to type a price, which a proposal will print without checking. Create a quotation for the commercials instead.`,
         });
       }
 
