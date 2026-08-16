@@ -20,8 +20,8 @@
     "test:watch": "jest --watch",
     "test:e2e": "jest --config test/jest-e2e.json --runInBand",
     "seed": "ts-node -r tsconfig-paths/register src/seed/seed.cli.ts",
+    "reset:documents": "ts-node -r tsconfig-paths/register src/documents/reset-document-model.cli.ts",
     "migrate:package-narrative": "ts-node -r tsconfig-paths/register src/packages/migrate-package-narrative.cli.ts",
-    "restore:template-lines": "ts-node -r tsconfig-paths/register src/templates/restore-template-lines.cli.ts",
     "admin:grant": "ts-node -r tsconfig-paths/register src/platform-admin/grant-platform-admin.cli.ts",
     "billing:sync-plans": "ts-node -r tsconfig-paths/register src/billing/sync-plan-catalog.cli.ts"
   },
