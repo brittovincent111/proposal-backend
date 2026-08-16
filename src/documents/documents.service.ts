@@ -300,6 +300,35 @@ export class DocumentsService {
 
   /* ------------------------------------------------------------------ write */
 
+  /**
+   * The hard wall at the write layer, which matters more than at the render one.
+   *
+   * Rendering can be corrected; a database row that holds both answers and priced
+   * lines cannot be told apart from a legitimate one afterwards. Rejecting rather
+   * than silently ignoring the field also means a client that has drifted out of
+   * sync finds out immediately instead of appearing to save.
+   */
+  private assertWritesMatchKind(
+    document: ProposalDocumentDocument,
+    dto: UpdateDocumentDto,
+  ): void {
+    const offending =
+      document.kind === 'PROPOSAL'
+        ? (['sections', 'overallDiscount', 'charges', 'taxInclusive', 'roundOff'] as const).filter(
+            (key) => dto[key] !== undefined,
+          )
+        : (['answers', 'templateId'] as const).filter((key) => dto[key] !== undefined);
+
+    if (!offending.length) return;
+
+    throw DomainException.invalid(
+      ErrorCodes.VALIDATION_FAILED,
+      document.kind === 'PROPOSAL'
+        ? `A proposal carries no pricing, so ${offending.join(', ')} cannot be set on it. Create a quotation for the commercials.`
+        : `A quotation has no template, so ${offending.join(', ')} cannot be set on it. Create a proposal for the narrative.`,
+    );
+  }
+
   async update(organizationId: string, id: string, userId: string, dto: UpdateDocumentDto) {
     const document = await this.get(organizationId, id);
     this.transitions.assertEditable(document.status);
@@ -311,6 +340,8 @@ export class DocumentsService {
         'Someone else changed this document while you were editing. Reload to see their changes.',
       );
     }
+
+    this.assertWritesMatchKind(document, dto);
 
     if (dto.title !== undefined) document.title = dto.title;
     if (dto.reference !== undefined) document.reference = dto.reference;
@@ -397,8 +428,11 @@ export class DocumentsService {
     if (dto.internalNotes !== undefined) document.draft.internalNotes = dto.internalNotes;
 
     // Totals are recomputed server-side on every save; a client-sent total is
-    // never trusted or stored (map.md §49).
-    document.draftTotals = (await this.priceDraft(organizationId, document)) as never;
+    // never trusted or stored (map.md §49). A proposal has nothing to price, so
+    // its draftTotals stay empty rather than a set of zeroes that read as free.
+    if (document.kind === 'QUOTATION') {
+      document.draftTotals = (await this.priceDraft(organizationId, document)) as never;
+    }
     await document.save();
 
     await this.recordEvent(document, 'UPDATED', userId);
@@ -494,6 +528,13 @@ export class DocumentsService {
   async addPackage(organizationId: string, id: string, userId: string, dto: AddPackageDto) {
     const document = await this.get(organizationId, id);
     this.transitions.assertEditable(document.status);
+
+    if (document.kind !== 'QUOTATION') {
+      throw DomainException.invalid(
+        ErrorCodes.VALIDATION_FAILED,
+        'A package is priced, so it can only be added to a quotation.',
+      );
+    }
 
     const entry = await this.packages.get(organizationId, dto.packageId);
     const settings = await this.organizations.getSettings(organizationId);
