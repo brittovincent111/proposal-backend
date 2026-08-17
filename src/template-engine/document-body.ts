@@ -50,9 +50,11 @@ const DOCUMENT_SANITIZE: sanitizeHtml.IOptions = {
       'style'
     ],
     div: [
-      'data-item-table',
-      'data-columns',
-      'data-show-totals',
+      // data-item-table / data-columns / data-show-totals were here until the
+      // proposal/quotation split. Dropping the expander only stopped the marker
+      // being honoured; dropping it from the allowlist stops it being stored,
+      // and this sanitiser runs on the way in precisely because the endpoint is
+      // reachable without the editor.
       'data-page-break',
       'data-layout-block',
       'data-layout-columns',
@@ -151,13 +153,6 @@ export function hasDocumentBody(html: unknown): boolean {
   return typeof html === 'string' && sanitiseDocumentBody(html).length > 0;
 }
 
-export interface DocumentBodyContext {
-  /** Resolved display values, keyed by dynamic field key. */
-  values: Record<string, string>;
-  /** Renders the priced-items table for a given column set. */
-  renderItemTable: (columns: string[], showTotals: boolean) => string;
-}
-
 /**
  * Why filling happens in two steps, at two different layers.
  *
@@ -170,14 +165,6 @@ export interface DocumentBodyContext {
 
 const FIELD_PATTERN =
   /<span\b[^>]*\bdata-dynamic-field="([^"]*)"[^>]*>[\s\S]*?<\/span>/gi;
-const ITEM_TABLE_PATTERN = /<div\b[^>]*\bdata-item-table[^>]*>[\s\S]*?<\/div>/gi;
-/**
- * Separate, non-global copy for existence checks.
- *
- * `RegExp.test` on a /g pattern advances `lastIndex`, so calling it twice on the
- * same string returns true then false. That is a real trap, not a style point.
- */
-const ITEM_TABLE_PRESENT = /<div\b[^>]*\bdata-item-table[^>]*>/i;
 
 /**
  * Substitutes each dynamic field marker with its resolved value.
@@ -195,26 +182,6 @@ export function fillDocumentFields(html: string, values: Record<string, string>)
   });
 }
 
-/** Replaces each item-table marker with the real priced table. */
-export function expandItemTables(
-  html: string,
-  renderItemTable: DocumentBodyContext['renderItemTable'],
-): string {
-  return html.replace(ITEM_TABLE_PATTERN, (match) => {
-    const columns = readAttribute(match, 'data-columns')
-      ?.split(',')
-      .map((entry) => entry.trim())
-      .filter(Boolean);
-    const showTotals = readAttribute(match, 'data-show-totals') !== 'false';
-    return renderItemTable(columns?.length ? columns : [], showTotals);
-  });
-}
-
-/** Both steps at once — the whole substitution, for tests and one-shot previews. */
-export function fillDocumentBody(html: string, context: DocumentBodyContext): string {
-  return fillDocumentFields(expandItemTables(html, context.renderItemTable), context.values);
-}
-
 /** Which dynamic fields a body actually uses — for the fill-in form later. */
 export function documentBodyFieldKeys(html: string): string[] {
   const keys = new Set<string>();
@@ -223,10 +190,6 @@ export function documentBodyFieldKeys(html: string): string[] {
     if (key) keys.add(key);
   }
   return [...keys];
-}
-
-export function documentBodyUsesItemTable(html: string): boolean {
-  return ITEM_TABLE_PRESENT.test(html);
 }
 
 function readAttribute(tag: string, name: string): string | null {

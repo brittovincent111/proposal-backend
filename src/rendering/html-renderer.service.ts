@@ -2,10 +2,11 @@ import { Injectable } from '@nestjs/common';
 import sanitizeHtml from 'sanitize-html';
 
 import {
-  documentBodyUsesItemTable,
-  expandItemTables,
-} from 'src/template-engine/document-body';
-import { CompiledDocument, ResolvedBlock } from 'src/template-engine/document.compiler';
+  CompiledDocument,
+  CompiledProposal,
+  CompiledQuotation,
+  ResolvedBlock,
+} from 'src/template-engine/document.compiler';
 import { formatMinor } from 'src/template-engine/money';
 import { DocumentLine, DocumentTotals, LineTotals } from 'src/template-engine/pricing.types';
 import { documentStyles, resolveTheme } from './document.styles';
@@ -182,35 +183,71 @@ const PRICING_COLUMNS: Record<
   },
 };
 
-/** What prints when an author has not chosen columns — matches the editor default. */
-const DEFAULT_PRICING_COLUMNS = ['name', 'quantity', 'rate', 'amount'];
+/** The columns a quotation prints. Fixed, like the rest of the quotation layout. */
+const PRICING_COLUMN_ORDER = ['name', 'quantity', 'rate', 'amount'];
 
 @Injectable()
 export class HtmlRendererService {
   render(document: CompiledDocument): string {
     const theme = resolveTheme(document.style ?? {}, document.meta.company?.accentColor);
-    const ownsFullLayout = Boolean(document.body);
-    const body = document.body
-      ? this.renderDocumentBody(document.body, document)
-      : document.blocks
-          .map((block) => {
-            const width = block.type === 'pageBreak' ? 'full' : block.width ?? 'full';
-            return `<div class="qtn-flow-item qtn-width-${width}">${this.renderBlock(block, document)}</div>`;
-          })
-          .join('\n');
+    const inner =
+      document.kind === 'QUOTATION'
+        ? this.renderQuotation(document)
+        : this.renderProposal(document);
 
     return `<style>${documentStyles(theme)}</style>
 <article class="qtn-document" data-page-size="${escapeAttribute(
       document.style?.pageSize ?? 'A4',
     )}" style="--qtn-accent: ${theme.accent}">
-${ownsFullLayout ? '' : this.renderLetterhead(document)}
-${ownsFullLayout ? '' : this.renderParties(document)}
-<div class="qtn-body">
-${body}
-</div>
-${ownsFullLayout ? '' : this.renderClosing(document)}
-${ownsFullLayout ? '' : this.renderFooter(document)}
+${inner}
 </article>`;
+  }
+
+  /**
+   * The one fixed layout every quotation gets. Nobody authors this.
+   *
+   * It is what `renderPricingAppendix` used to bolt onto the end of a narrative
+   * document, promoted to be the whole thing — minus the forced page break, which
+   * only made sense when pricing followed pages of prose and would otherwise emit
+   * a blank leading page here.
+   */
+  private renderQuotation(document: CompiledQuotation): string {
+    return `${this.renderLetterhead(document)}
+${this.renderParties(document)}
+<div class="qtn-body">
+${this.renderPricing(document)}
+</div>
+${this.renderClosing(document)}
+${this.renderFooter(document)}`;
+  }
+
+  /**
+   * A proposal: either the authored body, or the block flow. Never any prices.
+   *
+   * An authored body owns the whole page — it places its own heading and
+   * addresses — so the system chrome is suppressed around it, exactly as before.
+   */
+  private renderProposal(document: CompiledProposal): string {
+    if (document.body) {
+      return `<div class="qtn-body">
+${this.renderDocumentBody(document.body, document)}
+</div>`;
+    }
+
+    const blocks = document.blocks
+      .map((block) => {
+        const width = block.type === 'pageBreak' ? 'full' : block.width ?? 'full';
+        return `<div class="qtn-flow-item qtn-width-${width}">${this.renderBlock(block)}</div>`;
+      })
+      .join('\n');
+
+    return `${this.renderLetterhead(document)}
+${this.renderParties(document)}
+<div class="qtn-body">
+${blocks}
+</div>
+${this.renderClosing(document)}
+${this.renderFooter(document)}`;
   }
 
   /** Standalone page — used by the public proposal route and the PDF renderer. */
@@ -279,7 +316,7 @@ ${this.render(document)}
     </div>
   </div>
   <div class="qtn-docmeta">
-    <p class="qtn-doctype">Quotation</p>
+    <p class="qtn-doctype">${document.kind === 'PROPOSAL' ? 'Proposal' : 'Quotation'}</p>
     <p class="qtn-docnumber">${escapeText(documentNumber)}</p>
     <dl class="qtn-docdates">${dates}</dl>
   </div>
@@ -318,18 +355,21 @@ ${title}`;
    * them must not print without them.
    */
   private renderClosing(document: CompiledDocument): string {
+    // Only a proposal can have printed these itself; a quotation's layout is
+    // fixed and never includes a terms block, so nothing is ever consumed.
+    const consumed = document.kind === 'PROPOSAL' ? document.consumed : undefined;
     const notes = [
       { label: 'Notes', body: document.meta.customerNotes, boxed: true },
       {
         label: 'Payment terms',
-        body: document.consumed?.paymentTerms ? '' : document.meta.paymentTerms,
+        body: consumed?.paymentTerms ? '' : document.meta.paymentTerms,
         boxed: false,
       },
       // Skipped when a terms block in the body already printed them, so the
       // customer never receives two terms sections.
       {
         label: 'Terms & conditions',
-        body: document.consumed?.terms ? '' : document.meta.terms,
+        body: consumed?.terms ? '' : document.meta.terms,
         boxed: false,
       },
     ].filter((note) => (note.body ?? '').trim().length > 0);
@@ -372,27 +412,8 @@ ${title}`;
    * the real priced table — the same table a `pricingTable` block produces, so
    * the two authoring styles cannot show different money.
    */
-  private renderDocumentBody(body: string, document: CompiledDocument): string {
-    const bodyOwnsPricing = documentBodyUsesItemTable(body);
-    const expanded = expandItemTables(body, (columns, showTotals) =>
-      this.renderPricing(document, columns, showTotals),
-    );
-    const appendix =
-      bodyOwnsPricing
-        ? this.renderDocumentClosing(document)
-        : !this.hasPricingContent(document)
-          ? ''
-          : this.renderPricingAppendix(document);
-    return `<div class="qtn-flow-item qtn-width-full"><section class="qtn-block qtn-block--document qtn-prose">${expanded}</section></div>${appendix}`;
-  }
-
-  /**
-   * A quotation still needs its commercial table even when the authored layout
-   * did not place an inline item-table marker. It prints on a fresh page so the
-   * authored narrative remains untouched and the pricing stays easy to scan.
-   */
-  private renderPricingAppendix(document: CompiledDocument): string {
-    return `<div class="qtn-flow-item qtn-width-full"><section class="qtn-block qtn-block--pricingTable" data-new-page="true">${this.renderLetterhead(document)}${this.renderParties(document)}${this.renderPricing(document)}${this.renderClosing(document)}</section></div>`;
+  private renderDocumentBody(body: string, document: CompiledProposal): string {
+    return `<div class="qtn-flow-item qtn-width-full"><section class="qtn-block qtn-block--document qtn-prose">${body}</section></div>${this.renderDocumentClosing(document)}`;
   }
 
   private renderDocumentClosing(document: CompiledDocument): string {
@@ -400,13 +421,9 @@ ${title}`;
     return closing ? `<div class="qtn-flow-item qtn-width-full">${closing}</div>` : '';
   }
 
-  private hasPricingContent(document: CompiledDocument): boolean {
-    return document.pricing.sections.some((section) => section.lines.length > 0);
-  }
-
   /* ----------------------------------------------------------------- blocks */
 
-  private renderBlock(block: ResolvedBlock, document: CompiledDocument): string {
+  private renderBlock(block: ResolvedBlock): string {
     const classes = `qtn-block qtn-block--${block.type} qtn-align-${block.align} qtn-spacing-${block.spacing} qtn-emphasis-${block.emphasis}`;
     const open = `<section class="${classes}" id="${escapeAttribute(block.id)}"${
       block.newPage ? ' data-new-page="true"' : ''
@@ -436,8 +453,6 @@ ${title}`;
         return `${open}<div class="qtn-gallery">${block.items
           .map((item) => this.renderImage(item, ''))
           .join('')}</div>${close}`;
-      case 'pricingTable':
-        return `${open}${this.renderPricingSection(block, document)}${close}`;
       case 'table':
         return `${open}${this.renderKeyValueTable(block)}${close}`;
       case 'repeatingList':
@@ -488,68 +503,14 @@ ${title}`;
     return `${heading}<table class="qtn-table"><tbody>${rows}</tbody></table>`;
   }
 
-  private renderPricingSection(block: ResolvedBlock, document: CompiledDocument): string {
-    const heading = sanitize((block.label ?? '').trim() || 'Items & pricing');
-    if (block.newPage) {
-      return `${this.renderCommercialHeader(document, heading)}${this.renderPricing(document)}`;
-    }
-    return `<h2>${heading}</h2>${this.renderPricing(document)}`;
-  }
-
-  private renderCommercialHeader(document: CompiledDocument, heading: string): string {
-    const { company, documentNumber, documentDate, validUntil, reference, locale } = document.meta;
-    const showLogo = document.style?.showLogo !== false;
-    const logo = showLogo && company.logoUrl ? httpUrl(company.logoUrl) : null;
-    const brandMark = logo
-      ? `<img class="qtn-logo" src="${escapeAttribute(logo)}" alt="${escapeAttribute(company.name)}" />`
-      : `<div class="qtn-monogram">${escapeText(initials(company.name))}</div>`;
-
-    const contact = [company.email, company.phone].map((entry) => (entry ?? '').trim()).filter(Boolean).join(' · ');
-    const contactLine = contact ? `<p class="qtn-commercial-line">${escapeText(contact)}</p>` : '';
-    const dates = [
-      ['Date', formatDate(documentDate, locale)],
-      ['Valid until', formatDate(validUntil, locale)],
-      ...(reference ? [['Reference', reference] as const] : []),
-    ]
-      .filter(([, value]) => Boolean(value))
-      .map(([label, value]) => `<dt>${escapeText(label)}</dt><dd>${escapeText(value)}</dd>`)
-      .join('');
-
-    return `<div class="qtn-commercial-header">
-  <div class="qtn-commercial-top">
-    <div class="qtn-commercial-brand">
-      ${brandMark}
-      <div>
-        <p class="qtn-commercial-company">${escapeText(company.name)}</p>
-        ${contactLine}
-      </div>
-    </div>
-    <div class="qtn-commercial-meta">
-      <p class="qtn-doctype">Quotation</p>
-      <p class="qtn-docnumber">${escapeText(documentNumber)}</p>
-      <dl class="qtn-docdates">${dates}</dl>
-    </div>
-  </div>
-  <div class="qtn-rule"></div>
-  <div class="qtn-commercial-heading">
-    <p class="qtn-commercial-kicker">Commercials</p>
-    <h2>${heading}</h2>
-  </div>
-</div>`;
-  }
-
-  private renderPricing(
-    document: CompiledDocument,
-    columns: string[] = DEFAULT_PRICING_COLUMNS,
-    showTotals = true,
-  ): string {
+  private renderPricing(document: CompiledQuotation): string {
     const { sections, totals, currency, locale, taxInclusive } = document.pricing;
     const money = (amount: number) => escapeText(formatMinor(amount, currency, locale));
 
-    // An unknown column name is dropped rather than printed as an empty column,
-    // and an empty request falls back to the four columns every quotation needs.
-    const chosen = columns.filter((key) => key in PRICING_COLUMNS);
-    const cols = chosen.length ? chosen : DEFAULT_PRICING_COLUMNS;
+    // Fixed now that the quotation layout is fixed. These were configurable only
+    // to serve the authored body's `data-columns` marker, which no longer exists.
+    const cols = PRICING_COLUMN_ORDER;
+    const showTotals = true;
     const span = cols.length;
 
     const sectionHtml = sections

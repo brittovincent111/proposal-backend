@@ -16,11 +16,19 @@ import { PdfService } from 'src/rendering/pdf.service';
 import { ReusableBlocksService } from 'src/reusable-blocks/reusable-blocks.service';
 import { ReusableBlockResolver } from 'src/template-engine/reusable-block.resolver';
 import { TemplatesService } from 'src/templates/templates.service';
-import { documentBodyUsesItemTable } from 'src/template-engine/document-body';
-import { CompiledDocument, DocumentCompiler } from 'src/template-engine/document.compiler';
+import {
+  CompiledDocument,
+  CompileMeta,
+  DocumentCompiler,
+} from 'src/template-engine/document.compiler';
 import { PackageResolver } from 'src/template-engine/package.resolver';
 import { PricingCalculator } from 'src/template-engine/pricing.calculator';
-import { DocumentSection, Discount, ExtraCharge } from 'src/template-engine/pricing.types';
+import {
+  DocumentSection,
+  Discount,
+  ExtraCharge,
+  emptyTotals,
+} from 'src/template-engine/pricing.types';
 import { TemplateSchemaValidator, formatZodError } from 'src/template-engine/template-schema.validator';
 import {
   TemplateBlock,
@@ -95,6 +103,7 @@ export class DocumentsService {
       organizationId: new Types.ObjectId(organizationId),
     };
     if (!query.includeArchived) filter.archivedAt = null;
+    if (query.kind) filter.kind = query.kind;
     if (query.status) filter.status = query.status;
     if (query.customerId) filter.customerId = new Types.ObjectId(query.customerId);
     if (query.templateId) filter.templateId = new Types.ObjectId(query.templateId);
@@ -115,7 +124,7 @@ export class DocumentsService {
         // draftTotals in full: its `lines` map gives the list a priced-line count
         // without shipping the draft itself, which is what the list must never do.
         .select(
-          'documentNumber title reference status currency locale ' +
+          'kind documentNumber title reference status currency locale ' +
             'customerSnapshot.name customerSnapshot.companyName customerSnapshot.customerId ' +
             'templateId templateName currentRevisionNumber validFrom validUntil draftTotals ' +
             'createdAt updatedAt',
@@ -196,17 +205,21 @@ export class DocumentsService {
     let terms = settings.defaultTerms;
     let paymentTerms = settings.defaultPaymentTerms;
     let validityDays = settings.defaultValidityDays;
-    let taxInclusive = settings.defaultTaxInclusive;
-    let roundOff = settings.defaultRoundOff;
-    const defaultTaxRateId = settings.defaultTaxRateId?.toString() ?? null;
-    /** Lines the template starts every quotation with, snapshotted by value. */
-    let templateLines: DocumentSection['lines'] = [];
-    let templatePackageSnapshots: Array<Record<string, unknown>> = [];
 
-    // An unnamed template falls back to the organization's default, so the
-    // ordinary case needs no template decision at all. A default that has since
-    // been archived is ignored rather than failing the create.
-    const requestedTemplateId = dto.templateId ?? settings.defaultTemplateId?.toString();
+    if (dto.kind === 'QUOTATION' && dto.templateId) {
+      throw DomainException.invalid(
+        ErrorCodes.VALIDATION_FAILED,
+        'A quotation has no template — its layout is fixed. Create a proposal to use a template.',
+      );
+    }
+
+    // A proposal without a named template falls back to the organization's
+    // default. A default that has since been archived is ignored rather than
+    // failing the create.
+    const requestedTemplateId =
+      dto.kind === 'PROPOSAL'
+        ? dto.templateId ?? settings.defaultTemplateId?.toString()
+        : undefined;
 
     if (requestedTemplateId) {
       const resolved = await this.templates
@@ -226,16 +239,6 @@ export class DocumentsService {
         terms = templateSettings.defaultTerms || terms;
         paymentTerms = templateSettings.defaultPaymentTerms || paymentTerms;
         validityDays = templateSettings.defaultValidityDays ?? validityDays;
-        taxInclusive = templateSettings.defaultTaxInclusive ?? taxInclusive;
-        roundOff = templateSettings.defaultRoundOff ?? roundOff;
-        ({ lines: templateLines, packageSnapshots: templatePackageSnapshots } =
-          await this.resolveTemplateDefaults(
-            organizationId,
-            templateSettings.defaultPackages,
-            templateSettings.defaultPackageIds,
-            version.linesJson,
-            defaultTaxRateId,
-          ));
       }
     }
 
@@ -247,6 +250,7 @@ export class DocumentsService {
 
     const document = await this.documents.create({
       organizationId: organization._id,
+      kind: dto.kind,
       documentNumber: number,
       title: dto.title ?? templateName,
       reference: dto.reference ?? '',
@@ -272,13 +276,18 @@ export class DocumentsService {
       validFrom: now,
       validUntil: dto.validUntil ? new Date(dto.validUntil) : addDays(now, validityDays),
       draft: {
-        answers: dto.answers ? this.parseAnswers(dto.answers) : {},
-        sections: [{ id: nextLocalId('sec'), title: 'Items', lines: templateLines }],
-        packageSnapshots: templatePackageSnapshots,
-        overallDiscount: { mode: 'PERCENT', value: 0 },
-        charges: [],
-        taxInclusive,
-        roundOff,
+        // Each kind writes only its own half. A proposal gets no `sections` at
+        // all rather than an empty one, so nothing downstream can mistake it for
+        // a quotation that happens to have no items yet.
+        ...(dto.kind === 'PROPOSAL'
+          ? { answers: dto.answers ? this.parseAnswers(dto.answers) : {} }
+          : {
+              sections: [{ id: nextLocalId('sec'), title: 'Items', lines: [] }],
+              overallDiscount: { mode: 'PERCENT', value: 0 },
+              charges: [],
+              taxInclusive: settings.defaultTaxInclusive,
+              roundOff: settings.defaultRoundOff,
+            }),
         terms,
         paymentTerms,
       },
@@ -291,6 +300,35 @@ export class DocumentsService {
 
   /* ------------------------------------------------------------------ write */
 
+  /**
+   * The hard wall at the write layer, which matters more than at the render one.
+   *
+   * Rendering can be corrected; a database row that holds both answers and priced
+   * lines cannot be told apart from a legitimate one afterwards. Rejecting rather
+   * than silently ignoring the field also means a client that has drifted out of
+   * sync finds out immediately instead of appearing to save.
+   */
+  private assertWritesMatchKind(
+    document: ProposalDocumentDocument,
+    dto: UpdateDocumentDto,
+  ): void {
+    const offending =
+      document.kind === 'PROPOSAL'
+        ? (['sections', 'overallDiscount', 'charges', 'taxInclusive', 'roundOff'] as const).filter(
+            (key) => dto[key] !== undefined,
+          )
+        : (['answers', 'templateId'] as const).filter((key) => dto[key] !== undefined);
+
+    if (!offending.length) return;
+
+    throw DomainException.invalid(
+      ErrorCodes.VALIDATION_FAILED,
+      document.kind === 'PROPOSAL'
+        ? `A proposal carries no pricing, so ${offending.join(', ')} cannot be set on it. Create a quotation for the commercials.`
+        : `A quotation has no template, so ${offending.join(', ')} cannot be set on it. Create a proposal for the narrative.`,
+    );
+  }
+
   async update(organizationId: string, id: string, userId: string, dto: UpdateDocumentDto) {
     const document = await this.get(organizationId, id);
     this.transitions.assertEditable(document.status);
@@ -302,6 +340,8 @@ export class DocumentsService {
         'Someone else changed this document while you were editing. Reload to see their changes.',
       );
     }
+
+    this.assertWritesMatchKind(document, dto);
 
     if (dto.title !== undefined) document.title = dto.title;
     if (dto.reference !== undefined) document.reference = dto.reference;
@@ -355,36 +395,8 @@ export class DocumentsService {
           }
           document.draft.terms = templateSettings.defaultTerms || document.draft.terms;
           document.draft.paymentTerms = templateSettings.defaultPaymentTerms || document.draft.paymentTerms;
-          document.draft.taxInclusive = templateSettings.defaultTaxInclusive ?? document.draft.taxInclusive;
-          document.draft.roundOff = templateSettings.defaultRoundOff ?? document.draft.roundOff;
         }
 
-        /*
-         * Seed the template's default lines.
-         *
-         * Only into a quotation that has no priced lines yet: switching template on a
-         * quotation somebody has already built would otherwise wipe or duplicate
-         * their work. An empty one is the case where seeding is obviously wanted, and
-         * it is what "choose a template and the items appear" means.
-         */
-        if (!this.hasPricedLines(document)) {
-          const orgSettings = await this.organizations.getSettings(organizationId);
-          const templateSettings = this.validator.parseSettings(version.settingsJson);
-          const seeded = await this.resolveTemplateDefaults(
-            organizationId,
-            templateSettings.defaultPackages,
-            templateSettings.defaultPackageIds,
-            version.linesJson,
-            orgSettings.defaultTaxRateId?.toString() ?? null,
-          );
-
-          const sections = this.parseSections(document.draft.sections);
-          const target = sections[0] ?? { id: nextLocalId('sec'), title: 'Items', lines: [] };
-          target.lines = seeded.lines;
-          if (!sections.includes(target)) sections.push(target);
-          document.draft.sections = sections as never;
-          document.draft.packageSnapshots = seeded.packageSnapshots as never;
-        }
       }
     }
 
@@ -396,10 +408,6 @@ export class DocumentsService {
 
     if (dto.answers !== undefined) {
       document.draft.answers = this.parseAnswers(dto.answers);
-      // A PACKAGE_SELECT answer is a decision about what is being quoted, not a
-      // string to print — map.md §16, "when selected during document creation:
-      // populate defaults". Runs before totals are recomputed below.
-      await this.syncPackagesFromAnswers(organizationId, document);
     }
     if (dto.sections !== undefined) {
       document.draft.sections = this.parseSections(dto.sections) as never;
@@ -420,133 +428,17 @@ export class DocumentsService {
     if (dto.internalNotes !== undefined) document.draft.internalNotes = dto.internalNotes;
 
     // Totals are recomputed server-side on every save; a client-sent total is
-    // never trusted or stored (map.md §49).
-    document.draftTotals = (await this.priceDraft(organizationId, document)) as never;
+    // never trusted or stored (map.md §49). A proposal has nothing to price, so
+    // its draftTotals stay empty rather than a set of zeroes that read as free.
+    if (document.kind === 'QUOTATION') {
+      document.draftTotals = (await this.priceDraft(organizationId, document)) as never;
+    }
     await document.save();
 
     await this.recordEvent(document, 'UPDATED', userId);
     return this.detail(organizationId, id);
   }
 
-  /**
-   * Applies every package a PACKAGE_SELECT answer names, and withdraws the ones
-   * the answers no longer name — map.md §16.
-   *
-   * Withdrawal is deliberately conservative. §16 also says a document may
-   * override what the package supplied ("Innova → Ertiga"), so a line the user
-   * has edited is kept when its package is deselected: only lines that still
-   * match the package are removed. A package edited upstream since it was
-   * applied therefore reads as "edited" and is also kept, which is the safe
-   * direction to be wrong in.
-   */
-  private async syncPackagesFromAnswers(
-    organizationId: string,
-    document: ProposalDocumentDocument,
-  ): Promise<void> {
-    if (!document.templateVersionId) return;
-
-    const version = await this.templates.requireVersion(organizationId, document.templateVersionId);
-    const fields = this.validator.parseFieldSchema(version.fieldSchemaJson);
-    const packageFields = fields.fields.filter((field) => field.type === 'PACKAGE_SELECT');
-    if (!packageFields.length) return;
-
-    const answers = document.draft.answers as Answers;
-    const tokens = packageFields
-      .flatMap((field) => {
-        const raw = answers?.[field.key];
-        return Array.isArray(raw) ? raw : [raw];
-      })
-      .map((value) => String(value ?? '').trim())
-      .filter((value) => value !== '');
-
-    const selected = await this.resolvePackageTokens(organizationId, tokens);
-    const selectedIds = new Set(selected.map((entry) => entry._id.toString()));
-    const snapshots = this.parsePackageSnapshots(document.draft.packageSnapshots);
-    const appliedIds = new Set(snapshots.map((snapshot) => snapshot.id));
-
-    const withdrawn = snapshots.filter((snapshot) => !selectedIds.has(snapshot.id));
-    const added = selected.filter((entry) => !appliedIds.has(entry._id.toString()));
-    if (!withdrawn.length && !added.length) return;
-
-    const settings = await this.organizations.getSettings(organizationId);
-    const defaultTaxRateId = settings.defaultTaxRateId?.toString() ?? null;
-    let sections = this.parseSections(document.draft.sections);
-
-    for (const snapshot of withdrawn) {
-      // eslint-disable-next-line no-await-in-loop
-      sections = await this.removeUnmodifiedPackageLines(
-        organizationId,
-        sections,
-        snapshot,
-        defaultTaxRateId,
-      );
-    }
-
-    const nextSnapshots = snapshots.filter(
-      (snapshot) => !withdrawn.includes(snapshot) || this.snapshotStillHasLines(snapshot, sections),
-    );
-
-    for (const entry of added) {
-      const lines = this.resolvePackageLines(entry, defaultTaxRateId);
-      sections = this.appendLines(sections, lines);
-      nextSnapshots.push(this.snapshotPackage(entry, lines.map((line) => line.id)) as never);
-    }
-
-    document.draft.sections = sections as never;
-    document.draft.packageSnapshots = this.reconcilePackageSnapshots(nextSnapshots, sections) as never;
-  }
-
-  /**
-   * A PACKAGE_SELECT option may hold a package id or its display name. Ids are
-   * what a picker should store; names are accepted because templates authored
-   * before packages were wired list human labels, and those must keep working.
-   */
-  private async resolvePackageTokens(
-    organizationId: string,
-    tokens: string[],
-  ): Promise<Array<Awaited<ReturnType<PackagesService['get']>>>> {
-    const resolved = new Map<string, Awaited<ReturnType<PackagesService['get']>>>();
-
-    for (const token of new Set(tokens)) {
-      if (Types.ObjectId.isValid(token)) {
-        // eslint-disable-next-line no-await-in-loop
-        const entry = await this.packages.get(organizationId, token).catch(() => null);
-        if (entry) {
-          resolved.set(entry._id.toString(), entry);
-          continue;
-        }
-      }
-
-      // eslint-disable-next-line no-await-in-loop
-      const page = await this.packages.list(organizationId, {
-        search: token,
-        limit: 25,
-        skip: 0,
-        page: 1,
-        includeArchived: false,
-      } as never);
-      const match = page.data.find(
-        (entry) => entry.name.trim().toLowerCase() === token.toLowerCase(),
-      );
-      // No match is not an error: the answer may legitimately be free text on a
-      // template whose options were never bound to real packages.
-      if (match) resolved.set(match._id.toString(), match);
-    }
-
-    return [...resolved.values()];
-  }
-
-  /**
-   * Replaces every 'reusableBlock' placeholder with the library block's own
-   * blocks — map.md §15, "templates can reference reusable blocks; during
-   * generation, RESOLVE them into a snapshot".
-   *
-   * A placeholder whose library entry is missing, archived or unreadable is
-   * dropped rather than failing generation: one stale reference must not make a
-   * quotation impossible to issue. The condition authored on the placeholder is
-   * inherited by each expanded block, so "show these terms only for interior
-   * jobs" keeps working after expansion.
-   */
   private async expandReusableBlocks(
     organizationId: string,
     blocks: TemplateBlock[],
@@ -587,184 +479,6 @@ export class DocumentsService {
     return expanded;
   }
 
-  /**
-   * Turns a template's default lines into document lines.
-   *
-   * Same contract as a package expansion: names, units and rates are copied by
-   * value, so editing the template later cannot move a quotation that already
-   * used it. Deliberately carries no packageId — these lines belong to the
-   * quotation, not to a bundle that can be removed or refreshed as a unit.
-   */
-  private resolveTemplateLines(
-    linesJson: unknown,
-    defaultTaxRateId: string | null,
-  ): DocumentSection['lines'] {
-    const parsed = this.validator.parseTemplateLines(linesJson);
-
-    return parsed.lines
-      .filter((line) => line.name.trim() !== '')
-      .map((line) => ({
-        id: nextLocalId('qln'),
-        kind: 'ITEM' as const,
-        itemId: line.itemId,
-        packageId: null,
-        packageName: '',
-        name: line.name,
-        description: line.description,
-        unit: line.unit,
-        pricingMode: 'QUANTITY_RATE' as const,
-        quantity: line.quantity,
-        days: 1,
-        rate: line.rate,
-        percent: 0,
-        formula: '',
-        manualAmount: 0,
-        taxRateId: line.taxRateId ?? defaultTaxRateId,
-        taxPercent: 0,
-        discount: { mode: 'PERCENT' as const, value: 0 },
-        optional: line.optional,
-        selected: true,
-      })) as DocumentSection['lines'];
-  }
-
-  /**
-   * New templates link packages instead of owning priced lines themselves.
-   *
-   * Existing templates may still carry `linesJson`, so that remains the fallback
-   * until they are edited onto the package-linked model.
-   */
-  private async resolveTemplateDefaults(
-    organizationId: string,
-    defaultPackages: Array<{
-      id: string;
-      sourcePackageId: string | null;
-      name: string;
-      description: string;
-      category: string;
-      pricingMode: 'SUM_OF_ITEMS' | 'FIXED_PRICE' | 'DISCOUNTED_TOTAL';
-      fixedPrice: number;
-      discountPercent: number;
-      lines: Array<{
-        lineId: string;
-        itemId: string | null;
-        name: string;
-        description: string;
-        unit: string;
-        quantity: number;
-        rate: number;
-        taxRateId: string | null;
-        optional: boolean;
-      }>;
-    }>,
-    defaultPackageIds: string[],
-    linesJson: unknown,
-    defaultTaxRateId: string | null,
-  ): Promise<{ lines: DocumentSection['lines']; packageSnapshots: Array<Record<string, unknown>> }> {
-    if (defaultPackages.length) {
-      return this.resolveTemplateSnapshotPackages(defaultPackages, defaultTaxRateId);
-    }
-
-    const packages = await this.resolveTemplateDefaultPackages(
-      organizationId,
-      defaultPackageIds,
-    );
-
-    if (!packages.length) {
-      return {
-        lines: this.resolveTemplateLines(linesJson, defaultTaxRateId),
-        packageSnapshots: [],
-      };
-    }
-
-    const lines: DocumentSection['lines'] = [];
-    const packageSnapshots: Array<Record<string, unknown>> = [];
-
-    for (const entry of packages) {
-      const resolved = this.resolvePackageLines(entry, defaultTaxRateId);
-      lines.push(...resolved);
-      packageSnapshots.push(this.snapshotPackage(entry, resolved.map((line) => line.id)));
-    }
-
-    return { lines, packageSnapshots };
-  }
-
-  private resolveTemplateSnapshotPackages(
-    entries: Array<{
-      id: string;
-      sourcePackageId: string | null;
-      name: string;
-      description: string;
-      category: string;
-      pricingMode: 'SUM_OF_ITEMS' | 'FIXED_PRICE' | 'DISCOUNTED_TOTAL';
-      fixedPrice: number;
-      discountPercent: number;
-      lines: Array<{
-        lineId: string;
-        itemId: string | null;
-        name: string;
-        description: string;
-        unit: string;
-        quantity: number;
-        rate: number;
-        taxRateId: string | null;
-        optional: boolean;
-      }>;
-    }>,
-    defaultTaxRateId: string | null,
-  ): { lines: DocumentSection['lines']; packageSnapshots: Array<Record<string, unknown>> } {
-    const lines: DocumentSection['lines'] = [];
-    const packageSnapshots: Array<Record<string, unknown>> = [];
-
-    for (const entry of entries) {
-      const resolved = this.packageResolver.resolve(
-        {
-          id: entry.id,
-          name: entry.name,
-          description: entry.description,
-          pricingMode: entry.pricingMode,
-          fixedPrice: entry.fixedPrice,
-          discountPercent: entry.discountPercent,
-          lines: entry.lines.map((line) => ({
-            itemId: line.itemId,
-            name: line.name,
-            description: line.description,
-            unit: line.unit,
-          quantity: line.quantity,
-          rate: line.rate,
-          taxRateId: line.taxRateId,
-          optional: line.optional,
-        })),
-        },
-        defaultTaxRateId,
-      );
-      lines.push(...resolved);
-      packageSnapshots.push(this.snapshotResolvedPackage(entry, resolved.map((line) => line.id)));
-    }
-
-    return { lines, packageSnapshots };
-  }
-
-  private async resolveTemplateDefaultPackages(
-    organizationId: string,
-    defaultPackageIds: string[],
-  ): Promise<Array<Awaited<ReturnType<PackagesService['get']>>>> {
-    const ordered = uniqueStrings(defaultPackageIds).filter((id) => Types.ObjectId.isValid(id));
-    const resolved: Array<Awaited<ReturnType<PackagesService['get']>>> = [];
-
-    for (const id of ordered) {
-      // eslint-disable-next-line no-await-in-loop
-      const entry = await this.packages.get(organizationId, id).catch(() => null);
-      if (entry && !entry.archivedAt) resolved.push(entry);
-    }
-
-    return resolved;
-  }
-
-  /**
-   * The one place a stored package becomes document lines. Both entry points —
-   * the item picker's addPackage and a PACKAGE_SELECT answer — go through here so
-   * they cannot drift into pricing the same package differently.
-   */
   private resolvePackageLines(
     entry: Awaited<ReturnType<PackagesService['get']>>,
     defaultTaxRateId: string | null,
@@ -792,51 +506,6 @@ export class DocumentsService {
     );
   }
 
-  /** Drops the deselected package's lines that a user has not edited. */
-  private async removeUnmodifiedPackageLines(
-    organizationId: string,
-    sections: DocumentSection[],
-    snapshot: { id: string; lineIds: string[] },
-    defaultTaxRateId: string | null,
-  ): Promise<DocumentSection[]> {
-    const entry = await this.packages.get(organizationId, snapshot.id).catch(() => null);
-    // The package itself is gone; its lines are all the document has left of it.
-    if (!entry) return sections;
-
-    const pristine = this.resolvePackageLines(entry, defaultTaxRateId);
-    const owned = new Set(snapshot.lineIds);
-
-    return sections.map((section) => ({
-      ...section,
-      lines: section.lines.filter((line) => {
-        if (!owned.has(line.id)) return true;
-        const original = pristine.find((candidate) => candidate.name === line.name);
-        return original ? !this.matchesPackageLine(line, original) : true;
-      }),
-    }));
-  }
-
-  /** Whether a document line still carries exactly what the package supplied. */
-  private matchesPackageLine(line: DocumentSection['lines'][number], original: DocumentSection['lines'][number]) {
-    return (
-      line.unit === original.unit &&
-      line.quantity === original.quantity &&
-      line.rate === original.rate &&
-      line.optional === original.optional &&
-      line.discount.mode === original.discount.mode &&
-      line.discount.value === original.discount.value &&
-      (line.taxRateId ?? null) === (original.taxRateId ?? null)
-    );
-  }
-
-  private snapshotStillHasLines(
-    snapshot: { lineIds: string[] },
-    sections: DocumentSection[],
-  ): boolean {
-    const remaining = new Set(sections.flatMap((section) => section.lines).map((line) => line.id));
-    return snapshot.lineIds.some((lineId) => remaining.has(lineId));
-  }
-
   private appendLines(
     sections: DocumentSection[],
     lines: DocumentSection['lines'],
@@ -859,6 +528,13 @@ export class DocumentsService {
   async addPackage(organizationId: string, id: string, userId: string, dto: AddPackageDto) {
     const document = await this.get(organizationId, id);
     this.transitions.assertEditable(document.status);
+
+    if (document.kind !== 'QUOTATION') {
+      throw DomainException.invalid(
+        ErrorCodes.VALIDATION_FAILED,
+        'A package is priced, so it can only be added to a quotation.',
+      );
+    }
 
     const entry = await this.packages.get(organizationId, dto.packageId);
     const settings = await this.organizations.getSettings(organizationId);
@@ -896,55 +572,25 @@ export class DocumentsService {
    * customer to address it to, and no lines to price — and stays out of the way
    * otherwise. A zero-value quotation is legitimate (a goodwill job, a revised
    * scope) so the value itself is not checked.
+   *
+   * This used to fetch the pinned template version and scan its blocks for a
+   * pricing table, because "does this document show prices?" had no other answer.
+   * The kind is that answer.
    */
-  private async assertSendable(
-    organizationId: string,
-    document: ProposalDocumentDocument,
-  ): Promise<void> {
+  private assertSendable(document: ProposalDocumentDocument): void {
     if (!document.customerSnapshot?.name && !document.customerSnapshot?.companyName) {
       throw DomainException.invalid(
         ErrorCodes.VALIDATION_FAILED,
-        'Add a customer before sending this quotation.',
+        'Add a customer before sending this document.',
       );
     }
 
-    /*
-     * Lines are only required when the document actually shows prices.
-     *
-     * A scope letter or a covering proposal is a legitimate document with no
-     * pricing table in its template, and demanding a line item made those
-     * impossible to send. So the rule follows the template: if it prints a price
-     * table, it needs something to put in it.
-     */
-    if (!this.hasPricedLines(document) && (await this.printsPricing(organizationId, document))) {
+    if (document.kind === 'QUOTATION' && !this.hasPricedLines(document)) {
       throw DomainException.invalid(
         ErrorCodes.VALIDATION_FAILED,
-        'This quotation shows a price table but has no items in it. Add an item, or remove the pricing block from its template.',
+        'This quotation has no items in it. Add an item before sending.',
       );
     }
-  }
-
-  /** Whether the pinned template puts a price table in the document. */
-  private async printsPricing(
-    organizationId: string,
-    document: ProposalDocumentDocument,
-  ): Promise<boolean> {
-    if (!document.templateVersionId) {
-      // No template means the compiler's fallback body, which does print prices.
-      return true;
-    }
-
-    const version = await this.templates
-      .requireVersion(organizationId, document.templateVersionId)
-      .catch(() => null);
-    if (!version) return true;
-
-    // A document-authored template prices through an item table in its body
-    // rather than a block, and needs items just as much.
-    if (documentBodyUsesItemTable(version.documentHtml ?? '')) return true;
-
-    const schema = this.validator.parseDocumentSchema(version.schemaJson);
-    return schema.blocks.some((block) => block.type === 'pricingTable');
   }
 
   /* --------------------------------------------------------------- generate */
@@ -972,7 +618,6 @@ export class DocumentsService {
     }
 
     const previous = await this.previousRevision(document, current?.revisionNumber ?? null);
-    const totals = compiled.pricing.totals;
     const payload = {
       documentId: document._id,
       organizationId: document.organizationId,
@@ -980,22 +625,14 @@ export class DocumentsService {
       templateVersionId: document.templateVersionId,
       inputValuesJson: document.draft.answers,
       resolvedDocumentJson: compiled as unknown as Record<string, unknown>,
-      pricingSnapshotJson: {
-        sections: compiled.pricing.sections,
-        totals,
-        taxInclusive: compiled.pricing.taxInclusive,
-      },
       styleSnapshotJson: compiled.style as unknown as Record<string, unknown>,
-      subtotal: totals.subtotal,
-      discountTotal: totals.discountTotal,
-      taxTotal: totals.taxTotal,
-      grandTotal: totals.grandTotal,
+      ...this.revisionPricing(compiled),
       createdById: new Types.ObjectId(userId),
     };
 
     const changeSummary = this.diffs.compare(
       previous,
-      { ...payload, ...totals },
+      { ...payload, ...payload.pricingSnapshotJson.totals },
       document.currency,
       document.locale,
     );
@@ -1017,7 +654,7 @@ export class DocumentsService {
 
     document.currentRevisionId = revision._id;
     document.currentRevisionNumber = revision.revisionNumber;
-    document.draftTotals = totals as never;
+    document.draftTotals = payload.pricingSnapshotJson.totals as never;
     await document.save();
 
     await this.recordEvent(document, 'GENERATED', userId, revision._id);
@@ -1043,7 +680,7 @@ export class DocumentsService {
 
     const compiled = await this.compile(organizationId, document);
     const previous = await this.revisions.findById(document.currentRevisionId).lean();
-    const totals = compiled.pricing.totals;
+    const pricing = this.revisionPricing(compiled);
 
     const payload = {
       documentId: document._id,
@@ -1052,16 +689,8 @@ export class DocumentsService {
       templateVersionId: document.templateVersionId,
       inputValuesJson: document.draft.answers,
       resolvedDocumentJson: compiled as unknown as Record<string, unknown>,
-      pricingSnapshotJson: {
-        sections: compiled.pricing.sections,
-        totals,
-        taxInclusive: compiled.pricing.taxInclusive,
-      },
       styleSnapshotJson: compiled.style as unknown as Record<string, unknown>,
-      subtotal: totals.subtotal,
-      discountTotal: totals.discountTotal,
-      taxTotal: totals.taxTotal,
-      grandTotal: totals.grandTotal,
+      ...pricing,
       createdById: new Types.ObjectId(userId),
     };
 
@@ -1071,7 +700,7 @@ export class DocumentsService {
         reason: dto.reason ?? '',
         ...this.diffs.compare(
           previous,
-          { ...payload, ...totals },
+          { ...payload, ...payload.pricingSnapshotJson.totals },
           document.currency,
           document.locale,
         ),
@@ -1081,7 +710,7 @@ export class DocumentsService {
     document.currentRevisionId = revision._id;
     document.currentRevisionNumber = revision.revisionNumber;
     document.status = 'DRAFT';
-    document.draftTotals = totals as never;
+    document.draftTotals = payload.pricingSnapshotJson.totals as never;
     await document.save();
 
     await this.recordEvent(document, 'REVISION_CREATED', userId, revision._id);
@@ -1147,7 +776,7 @@ export class DocumentsService {
       );
     }
     this.transitions.assertCanTransition(document.status, 'SENT');
-    await this.assertSendable(organizationId, document);
+    this.assertSendable(document);
 
     if (!document.currentRevisionId) await this.generate(organizationId, id, userId);
     const fresh = await this.get(organizationId, id);
@@ -1246,11 +875,27 @@ export class DocumentsService {
 
   /* --------------------------------------------------------------- internals */
 
-  /** Runs the full compile for the *current draft* against its pinned template version. */
+  /** Runs the full compile for the *current draft*, by kind. */
   private async compile(
     organizationId: string,
     document: ProposalDocumentDocument,
   ): Promise<CompiledDocument> {
+    const meta = this.compileMeta(document);
+
+    if (document.kind === 'QUOTATION') {
+      return this.compiler.compile({
+        kind: 'QUOTATION',
+        style: this.validator.parseStyleSchema(undefined),
+        sections: this.parseSections(document.draft.sections),
+        taxRates: await this.catalog.taxSnapshots(organizationId),
+        overallDiscount: this.parseDiscount(document.draft.overallDiscount),
+        charges: this.parseCharges(document.draft.charges),
+        taxInclusive: document.draft.taxInclusive,
+        roundOff: document.draft.roundOff,
+        meta,
+      });
+    }
+
     const version = document.templateVersionId
       ? await this.templates.requireVersion(organizationId, document.templateVersionId)
       : null;
@@ -1272,50 +917,82 @@ export class DocumentsService {
     this.variables.assertAnswersValid(fields, answers);
 
     return this.compiler.compile({
+      kind: 'PROPOSAL',
       schema,
       fields,
       style,
       answers,
-      // Read from the pinned version, so a quotation prints the body that was
+      // Read from the pinned version, so a proposal prints the body that was
       // published when it was created — not whatever the template says today.
       documentHtml: version?.documentHtml ?? '',
-      packages: this.parsePackageSnapshots(document.draft.packageSnapshots),
-      sections: this.parseSections(document.draft.sections),
-      taxRates: await this.catalog.taxSnapshots(organizationId),
-      overallDiscount: this.parseDiscount(document.draft.overallDiscount),
-      charges: this.parseCharges(document.draft.charges),
-      taxInclusive: document.draft.taxInclusive,
-      roundOff: document.draft.roundOff,
-      meta: {
-        documentNumber: document.documentNumber,
-        documentDate: document.validFrom,
-        validUntil: document.validUntil,
-        currency: document.currency,
-        locale: document.locale,
-        title: document.title,
-        reference: document.reference,
-        customer: {
-          name: document.customerSnapshot.name,
-          companyName: document.customerSnapshot.companyName,
-          email: document.customerSnapshot.email,
-          phone: document.customerSnapshot.phone,
-          billingAddress: document.customerSnapshot.billingAddress,
-        },
-        company: {
-          name: document.companySnapshot.name,
-          address: document.companySnapshot.address,
-          phone: document.companySnapshot.phone,
-          email: document.companySnapshot.email,
-          website: document.companySnapshot.website,
-          taxNumber: document.companySnapshot.taxNumber,
-          logoUrl: document.companySnapshot.logoUrl,
-          accentColor: document.companySnapshot.accentColor,
-        },
-        terms: document.draft.terms,
-        paymentTerms: document.draft.paymentTerms,
-        customerNotes: document.draft.customerNotes,
-      },
+      meta,
     });
+  }
+
+  /** The letterhead, parties and closing content, identical for both kinds. */
+  private compileMeta(document: ProposalDocumentDocument): CompileMeta {
+    return {
+      documentNumber: document.documentNumber,
+      documentDate: document.validFrom,
+      validUntil: document.validUntil,
+      currency: document.currency,
+      locale: document.locale,
+      title: document.title,
+      reference: document.reference,
+      customer: {
+        name: document.customerSnapshot.name,
+        companyName: document.customerSnapshot.companyName,
+        email: document.customerSnapshot.email,
+        phone: document.customerSnapshot.phone,
+        billingAddress: document.customerSnapshot.billingAddress,
+      },
+      company: {
+        name: document.companySnapshot.name,
+        address: document.companySnapshot.address,
+        phone: document.companySnapshot.phone,
+        email: document.companySnapshot.email,
+        website: document.companySnapshot.website,
+        taxNumber: document.companySnapshot.taxNumber,
+        logoUrl: document.companySnapshot.logoUrl,
+        accentColor: document.companySnapshot.accentColor,
+      },
+      terms: document.draft.terms,
+      paymentTerms: document.draft.paymentTerms,
+      customerNotes: document.draft.customerNotes,
+    };
+  }
+
+  /**
+   * The priced half of a revision payload, or its absence.
+   *
+   * A proposal has no totals to freeze, so it writes an empty snapshot and leaves
+   * the four denormalised columns at the schema's zero default. Anything reading a
+   * proposal revision must therefore check `kind` rather than trusting a 0 to mean
+   * "free" — `publicPayload` is the one that matters, and it returns null.
+   */
+  private revisionPricing(compiled: CompiledDocument) {
+    if (compiled.kind === 'PROPOSAL') {
+      return {
+        pricingSnapshotJson: { sections: [], totals: emptyTotals(), taxInclusive: false },
+        subtotal: 0,
+        discountTotal: 0,
+        taxTotal: 0,
+        grandTotal: 0,
+      };
+    }
+
+    const totals = compiled.pricing.totals;
+    return {
+      pricingSnapshotJson: {
+        sections: compiled.pricing.sections,
+        totals,
+        taxInclusive: compiled.pricing.taxInclusive,
+      },
+      subtotal: totals.subtotal,
+      discountTotal: totals.discountTotal,
+      taxTotal: totals.taxTotal,
+      grandTotal: totals.grandTotal,
+    };
   }
 
   /** Totals for the draft, without requiring answers to be complete yet. */
@@ -1556,8 +1233,4 @@ function unique(values: Array<string | null | undefined>): Types.ObjectId[] {
   return [...seen]
     .filter((value) => Types.ObjectId.isValid(value))
     .map((value) => new Types.ObjectId(value));
-}
-
-function uniqueStrings(values: string[]): string[] {
-  return [...new Set(values.filter((value) => value.trim() !== ''))];
 }

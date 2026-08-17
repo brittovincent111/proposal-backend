@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { MongooseModule } from '@nestjs/mongoose';
 
 import { BillingModule } from 'src/billing/billing.module';
+import { LeadsModule } from 'src/leads/leads.module';
 import { Organization, OrganizationSchema } from 'src/organizations/organization.schema';
 import { User, UserSchema } from 'src/users/user.schema';
 import { PlatformAdminController } from './platform-admin.controller';
@@ -11,6 +12,7 @@ import { PlatformAdminService } from './platform-admin.service';
 @Module({
   imports: [
     BillingModule,
+    LeadsModule,
     MongooseModule.forFeature([
       { name: Organization.name, schema: OrganizationSchema },
       { name: User.name, schema: UserSchema },

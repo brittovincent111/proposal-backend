@@ -1,36 +1,27 @@
-import { CompiledDocument } from 'src/template-engine/document.compiler';
+import {
+  CompiledProposal,
+  CompiledQuotation,
+  ResolvedBlock,
+} from 'src/template-engine/document.compiler';
 import { emptyTotals } from 'src/template-engine/pricing.types';
 import { HtmlRendererService } from './html-renderer.service';
 
 describe('HtmlRendererService', () => {
   const renderer = new HtmlRendererService();
 
-  const compiled = (overrides: Partial<CompiledDocument> = {}): CompiledDocument =>
+  const heading: ResolvedBlock = {
+    id: 'b1',
+    type: 'heading',
+    label: '',
+    content: 'Your Kerala itinerary',
+    items: [],
+    align: 'left',
+    spacing: 'normal',
+    emphasis: 'normal',
+  };
+
+  const pricing = () =>
     ({
-      schemaVersion: 1,
-      blocks: [
-        {
-          id: 'b1',
-          type: 'heading',
-          label: '',
-          content: 'Your Kerala itinerary',
-          items: [],
-          align: 'left',
-          spacing: 'normal',
-          emphasis: 'normal',
-        },
-        {
-          id: 'b2',
-          type: 'pricingTable',
-          label: '',
-          content: '',
-          items: [],
-          align: 'left',
-          spacing: 'normal',
-          emphasis: 'normal',
-        },
-      ],
-      pricing: {
         sections: [
           {
             id: 's1',
@@ -58,12 +49,14 @@ describe('HtmlRendererService', () => {
             ],
           },
         ],
-        totals: { ...emptyTotals(), subtotal: 2_400_000, grandTotal: 2_400_000 },
-        currency: 'INR',
-        locale: 'en-IN',
-        taxInclusive: false,
-      },
-      meta: {
+      totals: { ...emptyTotals(), subtotal: 2_400_000, grandTotal: 2_400_000 },
+      currency: 'INR',
+      locale: 'en-IN',
+      taxInclusive: false,
+    }) as unknown as CompiledQuotation['pricing'];
+
+  const meta = () =>
+    ({
         documentNumber: 'Q-2026-00002',
         documentDate: new Date('2026-08-10T00:00:00Z'),
         validUntil: new Date('2026-08-25T00:00:00Z'),
@@ -89,39 +82,62 @@ describe('HtmlRendererService', () => {
           logoUrl: null,
           accentColor: '#0f6a63',
         },
-        terms: 'Cancellation within 7 days is non-refundable.',
-        paymentTerms: '50% advance, balance before arrival.',
-        customerNotes: 'Airport pickup included.',
-      },
-      style: {
-        accentColor: '#2563eb',
-        fontFamily: 'Inter',
-        pageSize: 'A4',
-        headerText: '',
-        footerText: '',
-        showLogo: true,
-        showPageNumbers: true,
-      },
-      ...overrides,
-    }) as CompiledDocument;
+      terms: 'Cancellation within 7 days is non-refundable.',
+      paymentTerms: '50% advance, balance before arrival.',
+      customerNotes: 'Airport pickup included.',
+    }) as CompiledQuotation['meta'];
+
+  const style = () =>
+    ({
+      accentColor: '#2563eb',
+      fontFamily: 'Inter',
+      pageSize: 'A4',
+      headerText: '',
+      footerText: '',
+      showLogo: true,
+      showPageNumbers: true,
+    }) as CompiledQuotation['style'];
+
+  /** A priced document: the fixed layout, no blocks, no authored body. */
+  const quotation = (overrides: Partial<CompiledQuotation> = {}): CompiledQuotation => ({
+    kind: 'QUOTATION',
+    schemaVersion: 1,
+    pricing: pricing(),
+    meta: meta(),
+    style: style(),
+    ...overrides,
+  });
+
+  /** An authored document: blocks or a body, and never a price anywhere. */
+  const proposal = (overrides: Partial<CompiledProposal> = {}): CompiledProposal => ({
+    kind: 'PROPOSAL',
+    schemaVersion: 1,
+    blocks: [heading],
+    meta: meta(),
+    style: style(),
+    ...overrides,
+  });
+
+  /** The markup alone: the inlined stylesheet mentions most attributes by name. */
+  const markup = (html: string) => html.replace(/<style>[\s\S]*?<\/style>/g, '');
 
   it('renders the letterhead, the parties and the document meta', () => {
-    const html = renderer.render(compiled());
+    const html = renderer.render(quotation());
 
     expect(html).toContain('Atlas Journeys');
     expect(html).toContain('Q-2026-00002');
     expect(html).toContain('14 days tour package');
     expect(html).toContain('Prepared for');
     expect(html).toContain('Nair Family');
-    expect(html).toContain('10 Aug 2026');
-    expect(html).toContain('25 Aug 2026');
+    expect(html).toMatch(/10[\s-]Aug[\s-]2026/);
+    expect(html).toMatch(/25[\s-]Aug[\s-]2026/);
     expect(html).toContain('ENQ-771');
     // No logo uploaded, so the brand falls back to a monogram.
     expect(html).toContain('<div class="qtn-monogram">AJ</div>');
   });
 
   it('prints the notes and terms held on the document', () => {
-    const html = renderer.render(compiled());
+    const html = renderer.render(quotation());
 
     expect(html).toContain('Airport pickup included.');
     expect(html).toContain('50% advance, balance before arrival.');
@@ -129,7 +145,7 @@ describe('HtmlRendererService', () => {
   });
 
   it('ships its own stylesheet so the preview, public page and print agree', () => {
-    const html = renderer.render(compiled());
+    const html = renderer.render(quotation());
 
     expect(html).toContain('<style>');
     expect(html).toContain('@page { size: A4;');
@@ -137,7 +153,7 @@ describe('HtmlRendererService', () => {
   });
 
   it('keeps fixed-height layout image columns stretched in rendered previews', () => {
-    const html = renderer.render(compiled());
+    const html = renderer.render(quotation());
 
     expect(html).toContain(
       '.qtn-block--document [data-layout-block][data-layout-min-height] > [data-layout-column] > p:has(> span[data-image-frame="true"]) > span[data-image-frame="true"] > img {',
@@ -149,14 +165,14 @@ describe('HtmlRendererService', () => {
   });
 
   it('falls back to the brand colour when the template kept the schema default', () => {
-    const html = renderer.render(compiled());
+    const html = renderer.render(quotation());
     expect(html).toContain('--qtn-accent: #0f6a63');
   });
 
   it("lets a template's own accent win over the brand colour", () => {
     const html = renderer.render(
-      compiled({
-        style: { ...compiled().style, accentColor: '#b4271b' },
+      quotation({
+        style: { ...quotation().style, accentColor: '#b4271b' },
       }),
     );
     expect(html).toContain('--qtn-accent: #b4271b');
@@ -164,8 +180,8 @@ describe('HtmlRendererService', () => {
 
   it('refuses a colour that is not a plain hex literal', () => {
     const html = renderer.render(
-      compiled({
-        style: { ...compiled().style, accentColor: 'red; } body { display: none } .x {' },
+      quotation({
+        style: { ...quotation().style, accentColor: 'red; } body { display: none } .x {' },
       }),
     );
 
@@ -175,8 +191,8 @@ describe('HtmlRendererService', () => {
 
   it('ignores an unknown font rather than writing it into CSS', () => {
     const html = renderer.render(
-      compiled({
-        style: { ...compiled().style, fontFamily: 'Comic Sans"; behavior: url(x)' },
+      quotation({
+        style: { ...quotation().style, fontFamily: 'Comic Sans"; behavior: url(x)' },
       }),
     );
 
@@ -185,7 +201,7 @@ describe('HtmlRendererService', () => {
   });
 
   it('escapes company and customer text', () => {
-    const base = compiled();
+    const base = proposal();
     const html = renderer.render({
       ...base,
       meta: {
@@ -200,13 +216,13 @@ describe('HtmlRendererService', () => {
 
   it('honours LETTER page size in the print rule', () => {
     const html = renderer.render(
-      compiled({ style: { ...compiled().style, pageSize: 'LETTER' } }),
+      quotation({ style: { ...quotation().style, pageSize: 'LETTER' } }),
     );
     expect(html).toContain('@page { size: Letter;');
   });
 
   it('renderPage wraps the document as a standalone HTML file', () => {
-    const html = renderer.renderPage(compiled());
+    const html = renderer.renderPage(quotation());
 
     expect(html.startsWith('<!doctype html>')).toBe(true);
     expect(html).toContain('<title>14 days tour package</title>');
@@ -214,7 +230,7 @@ describe('HtmlRendererService', () => {
   });
 
   it('renders a revision whose dates came back from JSON as strings', () => {
-    const base = compiled();
+    const base = proposal();
     const html = renderer.render({
       ...base,
       meta: {
@@ -224,55 +240,26 @@ describe('HtmlRendererService', () => {
       },
     });
 
-    expect(html).toContain('10 Aug 2026');
+    expect(html).toMatch(/10[\s-]Aug[\s-]2026/);
   });
 
   describe('page structure', () => {
     it('marks only the block asked to start a new page', () => {
-      const base = compiled();
+      const base = proposal();
       const html = renderer.render({
         ...base,
         blocks: [
           { ...base.blocks[0], id: 'intro', newPage: false },
-          { ...base.blocks[1], id: 'pricing', newPage: true },
+          { ...base.blocks[0], id: 'appendix', content: 'Appendix', newPage: true },
         ],
       });
 
       expect(/id="intro"[^>]*data-new-page/.test(html)).toBe(false);
-      expect(/id="pricing"[^>]*data-new-page="true"/.test(html)).toBe(true);
-    });
-
-    it('renders the pricing block label above the table', () => {
-      const base = compiled();
-      const html = renderer.render({
-        ...base,
-        blocks: [
-          base.blocks[0],
-          { ...base.blocks[1], label: 'Commercials' },
-        ],
-      });
-
-      expect(html).toContain('<h2>Commercials</h2>');
-    });
-
-    it('renders a compact quotation header when pricing starts on a fresh page', () => {
-      const base = compiled();
-      const html = renderer.render({
-        ...base,
-        blocks: [
-          { ...base.blocks[0], id: 'intro', newPage: false },
-          { ...base.blocks[1], id: 'pricing', label: 'Items', newPage: true },
-        ],
-      });
-
-      expect(html).toContain('qtn-commercial-header');
-      expect(html).toContain('Commercials');
-      expect(html).toContain('<h2>Items</h2>');
-      expect(html).toContain('Q-2026-00002');
+      expect(/id="appendix"[^>]*data-new-page="true"/.test(html)).toBe(true);
     });
 
     it('breaks before it on paper and shows a marker on screen', () => {
-      const html = renderer.render(compiled());
+      const html = renderer.render(quotation());
 
       expect(html).toContain('break-before: page');
       expect(html).toContain('content: "New page"');
@@ -282,14 +269,14 @@ describe('HtmlRendererService', () => {
 
     it('leaves a revision compiled before this feature alone', () => {
       // `newPage` is absent entirely, as an older resolvedDocumentJson has it.
-      const html = renderer.render(compiled());
+      const html = renderer.render(quotation());
 
       expect(/id="b1"[^>]*data-new-page/.test(html)).toBe(false);
       expect(/id="b2"[^>]*data-new-page/.test(html)).toBe(false);
     });
 
     it('renders generic field blocks as labelled value cards', () => {
-      const base = compiled();
+      const base = proposal();
       const html = renderer.render({
         ...base,
         blocks: [
@@ -312,7 +299,7 @@ describe('HtmlRendererService', () => {
     });
 
     it('renders generic repeating lists with the standard list style', () => {
-      const base = compiled();
+      const base = proposal();
       const html = renderer.render({
         ...base,
         blocks: [
@@ -336,123 +323,67 @@ describe('HtmlRendererService', () => {
   });
 
   describe('a document-authored body', () => {
-    it('keeps the authored body clean and moves quotation chrome and closing to the pricing page', () => {
+    it('prints the authored body alone, with no prices anywhere', () => {
       const html = renderer.render(
-        compiled({ body: '<h1>Proposal</h1><p>Our scope of work.</p>' }),
+        proposal({ body: '<h1>Proposal</h1><p>Our scope of work.</p>' }),
       );
 
       expect(html).toContain('<h1>Proposal</h1>');
       expect(html).toContain('Our scope of work.');
-      // The blocks in the fixture would otherwise print this heading.
+      // The body owns the page, so the fixture's block heading does not print.
       expect(html).not.toContain('Your Kerala itinerary');
-      // The fresh pricing page carries the quotation/company/customer chrome.
-      expect(html).toContain('Atlas Journeys');
-      expect(html).toContain('Prepared for');
-      expect(html).toContain('Q-2026-00002');
+      // The closing still follows: notes and terms belong to a proposal too.
       expect(html).toContain('Airport pickup included.');
-      expect(html).toContain('50% advance, balance before arrival.');
       expect(html).toContain('Cancellation within 7 days is non-refundable.');
-      expect(html).not.toContain('<footer class="qtn-footer">');
-      // Real quotation items still follow on a fresh page when the body itself
-      // did not place the item table.
-      expect(html).toContain('Houseboat, 1 night');
-      expect(html).toContain('<table class="qtn-pricing">');
-      expect(html).toContain(
-        'class="qtn-block qtn-block--pricingTable" data-new-page="true"><header class="qtn-letterhead">',
-      );
+      // No pricing appendix bolted on the end any more. That function existed to
+      // give a narrative document its commercial table; the hard wall says a
+      // proposal never gets one.
+      expect(html).not.toContain('<table class="qtn-pricing">');
+      expect(html).not.toContain('Houseboat, 1 night');
+      expect(markup(html)).not.toContain('data-new-page="true"');
     });
 
-    it('expands the item table into the same priced table a block would show', () => {
+    it('never expands an item-table marker into a priced table', () => {
+      // The sanitiser stops the marker being stored in the first place (see
+      // document-body.spec) — this is the renderer's half: even handed one, it
+      // has no expander left, so the div passes through inert rather than
+      // becoming prices on a proposal.
       const html = renderer.render(
-        compiled({ body: '<p>Prices</p><div data-item-table="true"></div>' }),
+        proposal({ body: '<p>Scope</p><div data-item-table="true"></div>' }),
       );
 
+      expect(html).toContain('Scope');
+      expect(html).not.toContain('<table class="qtn-pricing">');
+      expect(html).not.toContain('Houseboat, 1 night');
+    });
+  });
+
+  describe('the quotation layout', () => {
+    it('prints the full letterhead, the table and the closing, starting on page 1', () => {
+      const html = renderer.render(quotation());
+
+      expect(html).toContain('<header class="qtn-letterhead">');
+      expect(html).toContain('<table class="qtn-pricing">');
       expect(html).toContain('Houseboat, 1 night');
       expect(html).toContain('₹24,000.00');
-      expect(html).toContain('<th>Item</th>');
-      expect(html).not.toContain('data-item-table');
-      expect((html.match(/<table class="qtn-pricing">/g) ?? []).length).toBe(1);
-      expect(html).not.toContain('<header class="qtn-letterhead">');
-      expect(html).not.toContain('<section class="qtn-parties">');
+      // The appendix used to force a break because it followed narrative pages.
+      // As the whole document it must not, or the PDF opens on a blank sheet.
+      expect(markup(html)).not.toContain('data-new-page="true"');
     });
 
-    it('keeps the closing under an inline item table inside the authored body flow', () => {
-      const html = renderer.render(
-        compiled({ body: '<p>Prices</p><div data-item-table="true"></div>' }),
-      );
+    it('carries the company address and tax number a tax document needs', () => {
+      // renderCommercialHeader, the compact continuation header, omitted both.
+      // Using it as the standalone layout would have shipped quotations without
+      // a registered address or a GSTIN on them.
+      const html = renderer.render(quotation());
 
-      expect(html).toContain('Airport pickup included.');
-      expect(html).toContain('50% advance, balance before arrival.');
-      expect(html).toContain('Cancellation within 7 days is non-refundable.');
-      expect((html.match(/<section class="qtn-closing">/g) ?? []).length).toBe(1);
+      expect(html).toContain('Kochi, Kerala');
+      expect(html).toContain('32AABCA1234F1Z5');
     });
 
-    it('prints only the columns the author chose', () => {
-      const html = renderer.render(
-        compiled({
-          body: '<div data-item-table="true" data-columns="name,amount"></div>',
-        }),
-      );
-
-      expect(html).toContain('<th>Item</th>');
-      expect(html).toContain('<th class="qtn-cell-numeric">Amount</th>');
-      expect(html).not.toContain('>Qty<');
-      expect(html).not.toContain('>Rate<');
-      // The label column spans everything but the amount.
-      expect(html).toContain('<th colspan="1">Subtotal</th>');
-    });
-
-    it('folds the unit into the quantity only when unit is not its own column', () => {
-      const withUnit = renderer.render(
-        compiled({ body: '<div data-item-table="true" data-columns="name,quantity,unit"></div>' }),
-      );
-      const without = renderer.render(
-        compiled({ body: '<div data-item-table="true" data-columns="name,quantity"></div>' }),
-      );
-
-      expect(withUnit).toContain('<th>Unit</th>');
-      expect(withUnit).toContain('<td class="qtn-cell-numeric">2</td>');
-      expect(without).toContain('<td class="qtn-cell-numeric">2 night</td>');
-    });
-
-    it('leaves out the totals when the author asked for a bare list', () => {
-      const html = renderer.render(
-        compiled({ body: '<div data-item-table="true" data-show-totals="false"></div>' }),
-      );
-
-      expect(html).toContain('Houseboat, 1 night');
-      expect(html).not.toContain('Subtotal');
-      // `qtn-total` still appears in the stylesheet, so the table itself is what
-      // gets checked: no footer means no totals.
-      expect(html).not.toContain('<tfoot>');
-    });
-
-    it('ignores a column name it does not know rather than printing a blank one', () => {
-      const html = renderer.render(
-        compiled({ body: '<div data-item-table="true" data-columns="name,nonsense,amount"></div>' }),
-      );
-
-      expect(html).toContain(
-        '<thead><tr><th>Item</th><th class="qtn-cell-numeric">Amount</th></tr></thead>',
-      );
-    });
-
-    it('does not append pricing when the quotation has no priced lines', () => {
-      const html = renderer.render(
-        compiled({
-          body: '<h1>Proposal</h1><p>Our scope of work.</p>',
-          pricing: {
-            ...compiled().pricing,
-            sections: [],
-            totals: emptyTotals(),
-          },
-        }),
-      );
-
-      expect(html).not.toContain('<table class="qtn-pricing">');
-      expect(html).not.toContain(
-        'class="qtn-block qtn-block--pricingTable" data-new-page="true"',
-      );
+    it('labels each kind as what it is', () => {
+      expect(renderer.render(quotation())).toContain('<p class="qtn-doctype">Quotation</p>');
+      expect(renderer.render(proposal())).toContain('<p class="qtn-doctype">Proposal</p>');
     });
   });
 });

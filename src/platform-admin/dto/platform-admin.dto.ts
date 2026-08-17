@@ -40,3 +40,25 @@ export class SetTenantStatusDto {
   @IsIn(['ACTIVE', 'SUSPENDED'])
   status!: 'ACTIVE' | 'SUSPENDED';
 }
+
+export class ListLeadsQueryDto {
+  @ApiPropertyOptional({ description: 'Matches lead name, email or company name.' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  search?: string;
+
+  @ApiPropertyOptional({ default: 50 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  limit?: number;
+
+  @ApiPropertyOptional({ default: 0 })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(0)
+  skip?: number;
+}

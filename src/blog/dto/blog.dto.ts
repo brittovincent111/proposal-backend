@@ -162,3 +162,61 @@ export class UpdateBlogPostDto {
   @IsDateString()
   publishedAt?: string | null;
 }
+
+export class GenerateBlogDraftDto {
+  @ApiProperty({ example: 'How sales teams can cut proposal turnaround time without rushing approvals' })
+  @IsString()
+  @MaxLength(180)
+  topic!: string;
+
+  @ApiPropertyOptional({ example: 'Focus on service businesses that send quotations every week.' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(240)
+  angle?: string;
+
+  @ApiPropertyOptional({ type: [String], example: ['quotation software', 'proposal turnaround time'] })
+  @IsOptional()
+  @IsArray()
+  @IsString({ each: true })
+  keywords?: string[];
+
+  @ApiPropertyOptional({ example: 'Mention follow-up discipline and approval bottlenecks.' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(4000)
+  notes?: string;
+}
+
+export class FindNextBlogTopicDto {
+  @ApiPropertyOptional({ enum: ['IN', 'GLOBAL'], example: 'IN' })
+  @IsOptional()
+  @IsString()
+  market?: string;
+
+  @ApiPropertyOptional({ example: 'en' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(12)
+  language?: string;
+
+  @ApiPropertyOptional({ example: 'CCTV / Security' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(120)
+  targetIndustry?: string;
+
+  @ApiPropertyOptional({ example: 'industry' })
+  @IsOptional()
+  @IsString()
+  @MaxLength(40)
+  contentType?: string;
+
+  @ApiPropertyOptional({
+    example: 'Prefer a format/template topic that can convert into a practical downloadable-style article.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(4000)
+  notes?: string;
+}

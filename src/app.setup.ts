@@ -63,7 +63,7 @@ export function configureApp(
 
   if (options.enableDocs ?? !config.isProduction) {
     const swagger = new DocumentBuilder()
-      .setTitle('QTN API')
+      .setTitle('QuoteProposal API')
       .setDescription('Proposal and quotation automation platform')
       .setVersion('1.0')
       .addCookieAuth('qtn_access')

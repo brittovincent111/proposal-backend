@@ -194,8 +194,19 @@ describe('TemplateSchemaValidator', () => {
     });
 
     it('accepts reserved variables the engine always provides', () => {
-      const report = validator.validate(schema([block({ content: '{{grand_total}}' })]), fields());
+      const report = validator.validate(schema([block({ content: '{{customer_name}}' })]), fields());
+      expect(report.valid).toBe(true);
       expect(report.warnings).toEqual([]);
+    });
+
+    it('blocks publish when a block prints a calculated total', () => {
+      // The hard wall at publish time. An error, not a warning: warnings do not
+      // block, and an author would ship a proposal with a silently blank total.
+      const report = validator.validate(schema([block({ content: '{{grand_total}}' })]), fields());
+
+      expect(report.valid).toBe(false);
+      expect(report.errors[0].code).toBe(ErrorCodes.UNKNOWN_VARIABLE_REFERENCE);
+      expect(report.errors[0].message).toContain('create a quotation');
     });
 
     it('accepts a document-authored template with no legacy blocks', () => {
@@ -215,9 +226,9 @@ describe('TemplateSchemaValidator', () => {
     });
   });
 
-  it('warns when a question re-implements the pricing table', () => {
+  it('warns when a question asks the operator to type a price', () => {
     const report = validator.validate(
-      validator.parseDocumentSchema({ blocks: [{ id: 'b1', type: 'pricingTable' }] }),
+      validator.parseDocumentSchema({ blocks: [{ id: 'b1', type: 'text', content: 'Hello' }] }),
       validator.parseFieldSchema({
         fields: [
           { id: 'f1', key: 'base_price', label: 'Base Price', type: 'CURRENCY' },
@@ -227,9 +238,9 @@ describe('TemplateSchemaValidator', () => {
       }),
     );
 
-    // A warning, never an error: existing templates must keep publishing.
+    // A warning, never an error: the numbers are the operator's own.
     expect(report.valid).toBe(true);
-    const flagged = report.warnings.filter((issue) => issue.message.includes('item table already handles'));
+    const flagged = report.warnings.filter((issue) => issue.message.includes('type a price'));
     expect(flagged).toHaveLength(2);
   });
 });

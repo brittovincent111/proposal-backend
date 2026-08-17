@@ -15,6 +15,9 @@ export const DocumentStatuses = [
 ] as const;
 export type DocumentStatus = (typeof DocumentStatuses)[number];
 
+export const DocumentKinds = ['PROPOSAL', 'QUOTATION'] as const;
+export type DocumentKind = (typeof DocumentKinds)[number];
+
 /** Frozen copy of the buyer — map.md §70. A later customer edit must not alter history. */
 @Schema({ _id: false })
 export class CustomerSnapshot {
@@ -86,6 +89,14 @@ export const PackageSnapshotSchema = SchemaFactory.createForClass(PackageSnapsho
  */
 @Schema({ _id: false })
 export class DocumentDraft {
+  /**
+   * Split by kind, and the service layer is what enforces it.
+   *
+   * `answers` belongs to a PROPOSAL, `sections` and everything priced below it to a
+   * QUOTATION. Mongoose keeps both declared because a conditional subdocument buys
+   * nothing here — the kind a document was created as never changes, so the unused
+   * half simply stays at its default and `update()` rejects a write to it.
+   */
   @Prop({ type: Object, default: {} }) answers!: Record<string, unknown>;
   @Prop({ type: [Object], default: [] }) sections!: Record<string, unknown>[];
   @Prop({ type: [PackageSnapshotSchema], default: [] }) packageSnapshots!: PackageSnapshot[];
@@ -106,6 +117,17 @@ export const DocumentDraftSchema = SchemaFactory.createForClass(DocumentDraft);
 export class ProposalDocument {
   @Prop({ type: Types.ObjectId, required: true, index: true })
   organizationId!: Types.ObjectId;
+
+  /**
+   * Which of the two documents this is — the hard wall.
+   *
+   * A PROPOSAL is a template plus answers and never carries a computed number; a
+   * QUOTATION carries priced lines and no template. Required with no default on
+   * purpose: a create path that forgets to set it should fail, not quietly mint a
+   * priced document.
+   */
+  @Prop({ type: String, required: true, enum: DocumentKinds, index: true })
+  kind!: DocumentKind;
 
   @Prop({ required: true })
   documentNumber!: string;
@@ -193,7 +215,7 @@ export const ProposalDocumentSchema = SchemaFactory.createForClass(ProposalDocum
 
 // map.md §30: uniqueness is enforced by the database, not by application checks.
 ProposalDocumentSchema.index({ organizationId: 1, documentNumber: 1 }, { unique: true });
-ProposalDocumentSchema.index({ organizationId: 1, status: 1 });
+ProposalDocumentSchema.index({ organizationId: 1, kind: 1, status: 1 });
 ProposalDocumentSchema.index({ organizationId: 1, customerId: 1 });
 ProposalDocumentSchema.index({ organizationId: 1, createdAt: -1 });
 ProposalDocumentSchema.index({ organizationId: 1, assignedToId: 1 });

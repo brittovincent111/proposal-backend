@@ -11,13 +11,11 @@ import {
   FieldSchemaJson,
   OPTION_FIELD_TYPES,
   StyleSchemaJson,
-  TemplateLinesJson,
   TemplateSettingsJson,
   blockVariables,
   documentSchemaJson,
   fieldSchemaJson,
   styleSchemaJson,
-  templateLinesJson,
   templateSettingsJson,
 } from './template.contract';
 
@@ -63,10 +61,6 @@ export class TemplateSchemaValidator {
     return this.parse(fieldSchemaJson, input, ErrorCodes.FIELD_SCHEMA_INVALID, 'field schema');
   }
 
-  parseTemplateLines(input: unknown): TemplateLinesJson {
-    return this.parse(templateLinesJson, input, ErrorCodes.TEMPLATE_SCHEMA_INVALID, 'template lines');
-  }
-
   parseStyleSchema(input: unknown): StyleSchemaJson {
     return this.parse(styleSchemaJson, input, ErrorCodes.TEMPLATE_SCHEMA_INVALID, 'style schema');
   }
@@ -105,16 +99,21 @@ export class TemplateSchemaValidator {
       }
 
       /*
-       * A question that asks for a price duplicates the pricing table, which
-       * already handles quantity, rate, tax, discounts and totals — and does the
-       * arithmetic. Templates that ask for "Base Price" or "Discount" as text put
-       * the operator in front of two pricing systems, one of which does not add up.
+       * A question that asks for a price is a hand-rolled pricing system.
+       *
+       * A template produces a proposal, which does no arithmetic — so a "Base
+       * Price" or "Discount" answer prints whatever the operator typed and never
+       * adds up with anything. A quotation is where prices belong; it computes
+       * quantity, rate, tax, discounts and totals from real line items.
+       *
+       * Still a warning, not an error: the numbers are the operator's own and
+       * printing them is a legitimate, if unwise, thing to want.
        */
       if (PRICING_QUESTION_KEYS.has(field.key)) {
         warnings.push({
           path: `fields[${index}].key`,
           code: ErrorCodes.FIELD_SCHEMA_INVALID,
-          message: `"${field.label}" asks for pricing the item table already handles. Consider removing it and adding a Pricing Table block instead.`,
+          message: `"${field.label}" asks the operator to type a price, which a proposal will print without checking. Create a quotation for the commercials instead.`,
         });
       }
 
@@ -182,6 +181,14 @@ export class TemplateSchemaValidator {
       blockVariables(block)
         .filter((variable) => !known.has(variable))
         .forEach((variable) => {
+          if (FORBIDDEN_MONEY_VARIABLES.includes(variable)) {
+            errors.push({
+              path: `blocks[${index}].content`,
+              code: ErrorCodes.UNKNOWN_VARIABLE_REFERENCE,
+              message: `Block "${block.label || block.type}" uses {{${variable}}}. A template produces a proposal, which never prints a calculated total — create a quotation for the pricing instead.`,
+            });
+            return;
+          }
           warnings.push({
             path: `blocks[${index}].content`,
             code: ErrorCodes.UNKNOWN_VARIABLE_REFERENCE,
@@ -341,6 +348,17 @@ export const RESERVED_VARIABLES = [
   'document_number',
   'document_date',
   'valid_until',
+];
+
+/**
+ * Money variables a template may no longer print — the hard wall, at publish time.
+ *
+ * These used to be reserved. A template now only ever produces a proposal, which
+ * carries no computed number, so naming one is an error rather than a warning: a
+ * warning is non-blocking and an author would publish straight past it, and the
+ * customer would receive a document with a silently blank total in it.
+ */
+export const FORBIDDEN_MONEY_VARIABLES = [
   'subtotal',
   'discount_total',
   'tax_total',

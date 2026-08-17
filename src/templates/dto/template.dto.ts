@@ -25,7 +25,6 @@ export class CreateTemplateDto {
     schemaJson?: unknown;
     fieldSchemaJson?: unknown;
     styleSchemaJson?: unknown;
-    linesJson?: unknown;
     settingsJson?: unknown;
     documentHtml?: string;
   };
@@ -60,15 +59,6 @@ export class UpdateDraftSettingsDto {
   })
   @IsObject()
   settingsJson!: Record<string, unknown>;
-}
-
-export class UpdateDraftLinesDto {
-  @ApiProperty({
-    type: Object,
-    description: 'Default line items for quotations from this template: { lines: [...] }.',
-  })
-  @IsObject()
-  linesJson!: Record<string, unknown>;
 }
 
 /**

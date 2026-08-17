@@ -220,15 +220,27 @@ export class PublicProposalsService {
         name: document.customerSnapshot.name,
         companyName: document.customerSnapshot.companyName,
       },
-      blocks: resolved?.blocks ?? [],
-      pricing: resolved?.pricing ?? null,
+      kind: document.kind,
+      blocks: resolved?.kind === 'PROPOSAL' ? resolved.blocks : [],
+      pricing: resolved?.kind === 'QUOTATION' ? resolved.pricing : null,
       style: resolved?.style ?? null,
-      totals: {
-        subtotal: revision.subtotal,
-        discountTotal: revision.discountTotal,
-        taxTotal: revision.taxTotal,
-        grandTotal: revision.grandTotal,
-      },
+      /*
+       * Null for a proposal, not zeroes.
+       *
+       * The revision's four total columns default to 0 for a proposal, and a 0
+       * here would render as a ₹0.00 grand total on the one page a customer
+       * actually opens. The hard wall says a proposal carries no computed number,
+       * and this is where that is enforced for the outside world.
+       */
+      totals:
+        document.kind === 'QUOTATION'
+          ? {
+              subtotal: revision.subtotal,
+              discountTotal: revision.discountTotal,
+              taxTotal: revision.taxTotal,
+              grandTotal: revision.grandTotal,
+            }
+          : null,
     };
   }
 }

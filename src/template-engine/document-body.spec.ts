@@ -1,17 +1,12 @@
 import {
   documentBodyFieldKeys,
-  documentBodyUsesItemTable,
-  fillDocumentBody,
+  fillDocumentFields,
   hasDocumentBody,
   sanitiseDocumentBody,
 } from './document-body';
 
 describe('document body', () => {
-  const context = {
-    values: { customer_name: 'Rahul Nair', grand_total: '₹1,29,350.00' },
-    renderItemTable: (columns: string[], showTotals: boolean) =>
-      `<table data-cols="${columns.join('|')}" data-totals="${showTotals}"></table>`,
-  };
+  const values = { customer_name: 'Rahul Nair', quote_reference: 'REF-88' };
 
   describe('sanitising', () => {
     it('keeps the structure a quotation document needs', () => {
@@ -104,21 +99,21 @@ describe('document body', () => {
   describe('filling in values', () => {
     const body = sanitiseDocumentBody(
       '<p>Dear <span data-dynamic-field="customer_name" data-label="Customer name">Customer name</span>,</p>' +
-        '<p>Total: <span data-dynamic-field="grand_total" data-label="Grand total">Grand total</span></p>',
+        '<p>Total: <span data-dynamic-field="quote_reference" data-label="Reference">Reference</span></p>',
     );
 
     it('replaces a marker with the resolved value', () => {
-      const filled = fillDocumentBody(body, context);
+      const filled = fillDocumentFields(body, values);
 
       expect(filled).toContain('Dear Rahul Nair,');
-      expect(filled).toContain('₹1,29,350.00');
+      expect(filled).toContain('REF-88');
       expect(filled).not.toContain('data-dynamic-field');
     });
 
     it('prints nothing for a field with no value, never the raw token', () => {
-      const filled = fillDocumentBody(
+      const filled = fillDocumentFields(
         sanitiseDocumentBody('<p>Ref: <span data-dynamic-field="reference">Reference</span></p>'),
-        context,
+        values,
       );
 
       expect(filled).toBe('<p>Ref: </p>');
@@ -127,9 +122,9 @@ describe('document body', () => {
     });
 
     it('escapes a value that contains markup', () => {
-      const filled = fillDocumentBody(
+      const filled = fillDocumentFields(
         sanitiseDocumentBody('<p><span data-dynamic-field="customer_name">Customer name</span></p>'),
-        { ...context, values: { customer_name: '<script>alert(1)</script>Acme' } },
+        { ...values, customer_name: '<script>alert(1)</script>Acme' },
       );
 
       expect(filled).not.toContain('<script>');
@@ -137,11 +132,11 @@ describe('document body', () => {
     });
 
     it('keeps safe inline styling around a resolved field value', () => {
-      const filled = fillDocumentBody(
+      const filled = fillDocumentFields(
         sanitiseDocumentBody(
           '<p><span data-dynamic-field="customer_name" style="color:#e11d48;font-size:12pt">Customer name</span></p>',
         ),
-        context,
+        values,
       );
 
       expect(filled).toContain('<span style="color:#e11d48;font-size:12pt">Rahul Nair</span>');
@@ -154,42 +149,44 @@ describe('document body', () => {
      * author's font size and colour vanish from the PDF.
      */
     it('keeps the styled wrapper the editor puts around a token', () => {
-      const filled = fillDocumentBody(
+      const filled = fillDocumentFields(
         sanitiseDocumentBody(
           '<p><span style="font-size:24px;color:rgb(37, 99, 235)">₹' +
-            '<span data-dynamic-field="grand_total" data-label="Grand total">Grand total</span>' +
+            '<span data-dynamic-field="quote_reference" data-label="Reference">Reference</span>' +
             ' / year</span></p>',
         ),
-        context,
+        values,
       );
 
       expect(filled).toBe(
-        '<p><span style="font-size:24px;color:rgb(37, 99, 235)">₹₹1,29,350.00 / year</span></p>',
+        '<p><span style="font-size:24px;color:rgb(37, 99, 235)">₹REF-88 / year</span></p>',
       );
     });
 
     it('keeps two tokens styled differently in one paragraph apart', () => {
-      const filled = fillDocumentBody(
+      const filled = fillDocumentFields(
         sanitiseDocumentBody(
           '<p><span style="color:#2563eb"><span data-dynamic-field="customer_name">Customer name</span></span>' +
-            ' / <span style="color:#dc2626"><span data-dynamic-field="grand_total">Grand total</span></span></p>',
+            ' / <span style="color:#dc2626"><span data-dynamic-field="quote_reference">Reference</span></span></p>',
         ),
-        context,
+        values,
       );
 
       expect(filled).toContain('<span style="color:#2563eb">Rahul Nair</span>');
-      expect(filled).toContain('<span style="color:#dc2626">₹1,29,350.00</span>');
+      expect(filled).toContain('<span style="color:#dc2626">REF-88</span>');
     });
 
-    it('expands the item table with its chosen columns', () => {
-      const filled = fillDocumentBody(
-        sanitiseDocumentBody('<div data-item-table="true" data-columns="name,qty,amount" data-show-totals="false"></div>'),
-        context,
+    it('strips an item-table marker rather than storing it', () => {
+      // The expander is gone, so the wall has to hold at the sanitiser: the
+      // endpoint is reachable without the editor, and a stored marker would
+      // otherwise sit in a proposal body waiting for someone to re-add support.
+      const sanitised = sanitiseDocumentBody(
+        '<div data-item-table="true" data-columns="name,amount" data-show-totals="false">x</div>',
       );
 
-      expect(filled).toContain('data-cols="name|qty|amount"');
-      expect(filled).toContain('data-totals="false"');
-      expect(filled).not.toContain('data-item-table');
+      expect(sanitised).not.toContain('data-item-table');
+      expect(sanitised).not.toContain('data-columns');
+      expect(sanitised).not.toContain('data-show-totals');
     });
   });
 
@@ -203,17 +200,5 @@ describe('document body', () => {
       expect(documentBodyFieldKeys(body).sort()).toEqual(['customer_name', 'terms']);
     });
 
-    it('reports whether it prices anything', () => {
-      expect(documentBodyUsesItemTable('<div data-item-table="true"></div>')).toBe(true);
-      expect(documentBodyUsesItemTable('<p>No prices here</p>')).toBe(false);
-    });
-
-    it('gives the same answer every time it is asked', () => {
-      // A /g regex advances lastIndex between .test calls; this catches that.
-      const body = '<div data-item-table="true"></div>';
-      expect(documentBodyUsesItemTable(body)).toBe(true);
-      expect(documentBodyUsesItemTable(body)).toBe(true);
-      expect(documentBodyUsesItemTable(body)).toBe(true);
-    });
   });
 });

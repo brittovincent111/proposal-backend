@@ -1,12 +1,11 @@
 /**
  * The template a brand-new organisation starts with.
  *
- * Provisioning used to leave an account with no template at all, which meant the
- * first quotation had nothing to compile against. These starters exist so the
- * very first document is already correct and — deliberately — so that none of
- * them asks the operator a single question: every value they print comes from
- * reserved variables the engine always supplies (customer, company, totals) or
- * from the quotation's own lines, notes and terms.
+ * A template produces a proposal — narrative and variables, never a price — so
+ * these are covering documents, not commercials. Deliberately none of them asks
+ * the operator a single question: every value they print comes from reserved
+ * variables the engine always supplies (customer, company, dates) or from the
+ * document's own notes and terms.
  *
  * Anything an operator would have to type is left out on purpose. A business
  * that wants questions, conditions or formulas builds its own template.
@@ -32,48 +31,53 @@ const INTRO: StarterBlock = {
   id: 'intro',
   type: 'text',
   content:
-    'Dear {{customer_name}}, thank you for the opportunity. Our quotation is set out below and is valid until {{valid_until}}.',
+    'Dear {{customer_name}}, thank you for the opportunity. Our proposal is set out below and is valid until {{valid_until}}.',
 };
 
-const PRICING: StarterBlock = { id: 'pricing', type: 'pricingTable', label: 'Pricing' };
-
 const STANDARD: StarterTemplate = {
-  name: 'Standard quotation',
-  description: 'A clean quotation: covering note, priced items, your terms.',
-  category: 'Quotation',
-  blocks: [INTRO, PRICING, { id: 'terms', type: 'terms', label: 'Terms & conditions' }],
+  name: 'Standard proposal',
+  description: 'A clean proposal: covering note, what you will deliver, your terms.',
+  category: 'Proposal',
+  blocks: [
+    INTRO,
+    {
+      id: 'deliverables',
+      type: 'repeatingList',
+      label: "What we'll deliver",
+      items: ['Replace these rows with your scope', 'One line per deliverable'],
+    },
+    { id: 'terms', type: 'terms', label: 'Terms & conditions' },
+  ],
 };
 
 const TRAVEL: StarterTemplate = {
   name: 'Travel proposal',
-  description: 'Covering note, trip summary, priced items and terms.',
-  category: 'Quotation',
+  description: 'Covering note, trip summary and terms.',
+  category: 'Proposal',
   blocks: [
     INTRO,
     {
       id: 'trip-summary',
       type: 'repeatingList',
       label: 'Trip summary',
-      items: ['Destination and dates as agreed', 'Pricing comes from your selected package items'],
+      items: ['Destination and dates as agreed', 'Itinerary highlights day by day'],
     },
-    PRICING,
     { id: 'terms', type: 'terms', label: 'Terms & conditions' },
   ],
 };
 
 const PROJECT: StarterTemplate = {
-  name: 'Project quotation',
-  description: 'Covering note, scope summary, priced items and terms.',
-  category: 'Quotation',
+  name: 'Project proposal',
+  description: 'Covering note, scope summary and terms.',
+  category: 'Proposal',
   blocks: [
     INTRO,
     {
       id: 'scope-summary',
       type: 'repeatingList',
       label: 'Scope summary',
-      items: ['Deliverables and assumptions can be listed here', 'Pricing comes from your selected items and packages'],
+      items: ['Deliverables and assumptions can be listed here', 'One line per work package'],
     },
-    PRICING,
     { id: 'terms', type: 'terms', label: 'Terms & conditions' },
   ],
 };

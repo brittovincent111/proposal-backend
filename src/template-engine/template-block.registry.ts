@@ -1,14 +1,6 @@
 import { TemplateBlock } from './template.contract';
 
-export interface CompilePackageSnapshot {
-  id: string;
-  name: string;
-  description: string;
-  lineIds: string[];
-}
-
 export interface TemplateBlockCompileContext {
-  packages: CompilePackageSnapshot[];
   meta: {
     terms: string;
     paymentTerms: string;
@@ -32,8 +24,6 @@ interface TemplateBlockDefinition {
   dynamicItems?: (context: TemplateBlockCompileContext) => string[];
   dynamicContent?: (context: TemplateBlockCompileContext) => string;
   consumesClosingSection?: 'terms' | 'paymentTerms';
-  commercialAnchor?: boolean;
-  explicitPageBreak?: boolean;
 }
 
 export const boundFieldBlockTypes = [
@@ -117,7 +107,6 @@ const templateBlockDefinitions = {
     type: 'pageBreak',
     contentPresence: 'never',
     dynamicItemsMode: 'append',
-    explicitPageBreak: true,
   },
   customer: {
     type: 'customer',
@@ -138,22 +127,6 @@ const templateBlockDefinitions = {
     type: 'repeatingList',
     contentPresence: 'items',
     dynamicItemsMode: 'append',
-  },
-  pricingTable: {
-    type: 'pricingTable',
-    contentPresence: 'always',
-    dynamicItemsMode: 'append',
-    commercialAnchor: true,
-  },
-  package: {
-    type: 'package',
-    contentPresence: 'body',
-    dynamicItemsMode: 'append',
-    dynamicItems: (context) =>
-      context.packages.map((entry) =>
-        entry.description ? `${entry.name} — ${entry.description}` : entry.name,
-      ),
-    dynamicContent: (context) => packageSummary(context.packages),
   },
   terms: {
     type: 'terms',
@@ -212,13 +185,6 @@ export function blocksConsumeClosingSections(blocks: ResolvedBlockSnapshot[]) {
     }
     return consumed;
   }, { terms: false, paymentTerms: false });
-}
-
-function packageSummary(packages: CompilePackageSnapshot[]): string {
-  if (!packages.length) return '';
-  return packages
-    .map((entry) => (entry.description ? `${entry.name}\n${entry.description}` : entry.name))
-    .join('\n\n');
 }
 
 function lines(value: string | undefined): string[] {
